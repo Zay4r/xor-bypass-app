@@ -1,9 +1,12 @@
+
+
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("dev.flutter.flutter-gradle-plugin")
 }
-
-import java.util.Properties
 
 val localProps = Properties()
 val localPropsFile = rootProject.file("local.properties")
@@ -11,9 +14,16 @@ if (localPropsFile.exists()) {
     localProps.load(localPropsFile.inputStream())
 }
 
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keyProps = Properties()
+if (keystorePropertiesFile.exists()) {
+    keyProps.load(FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace = "com.example.app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 35
+    buildToolsVersion = "35.0.0"
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -23,8 +33,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.app"
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+         minSdk = flutter.minSdkVersion
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         buildConfigField("String", "MASTER_SECRET", 

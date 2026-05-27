@@ -31,14 +31,14 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   bool _holding = false;
   double _colorProgress = 0.0;
 
-  static const _channel = MethodChannel('com.example.xor_vpn/vpn');
+  static const _channel = MethodChannel('com.example.app/vpn');
 
   Future<void> _startVpn() async {
-    await _channel.invokeMethod('startVpn');
+    await _channel.invokeMethod('connect');
   }
 
   Future<void> _stopVpn() async {
-    await _channel.invokeMethod('stopVpn');
+    await _channel.invokeMethod('disconnect');
   }
 
   late AnimationController _spinController;
@@ -47,19 +47,53 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == "onStatusChange") {
+        final String status = call.arguments as String;
+
+        // ── Denied / kicked ────────────────────────────────────────────────
+        // Arrives either at startup or mid-session
+        if (status == "denied" || status.startsWith("denied:")) {
+          _resetToDisconnected();
+          final reason = status.contains(':') ? status.split(':').last : 'blocked';
+          _showAccessDeniedDialog(reason);
+          return;
+        }
+
+        setState(() {
+          if (status == "connected") {
+            _connected = true;
+            _holding = false;
+            _colorProgress = 1.0;
+            _spinController.stop();
+          } else if (status == "connecting") {
+            _holding = true;
+            _connected = false;
+          } else if (status == "disconnected" || status.startsWith("error")) {
+            // Service stopped itself (kick, error, or normal stop from notification)
+            _resetToDisconnected();
+          }
+        });
+      }
+    });
+
     _spinController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 4),
     );
+
     _colorController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 2),
     );
+
     _colorController.addListener(() {
       setState(() {
         _colorProgress = _colorController.value;
       });
     });
+
     _colorController.addStatusListener((status) {
       if (status == AnimationStatus.completed && _holding) {
         _onConnected();
@@ -73,6 +107,56 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
     _colorController.dispose();
     super.dispose();
   }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  /// Snaps all visual state back to the disconnected position.
+  void _resetToDisconnected() {
+    setState(() {
+      _connected = false;
+      _holding = false;
+      _colorProgress = 0.0;
+    });
+    _spinController.stop();
+    _colorController.reverse();
+  }
+
+  /// Shows a non-dismissable dialog explaining why the connection was refused.
+  void _showAccessDeniedDialog(String reason) {
+    final isExpired = reason == 'expired';
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: const [
+            Icon(Icons.block_rounded, color: Colors.red, size: 22),
+            SizedBox(width: 8),
+            Text(
+              'Access Denied',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+        content: Text(
+          isExpired
+              ? 'Your free trial has ended.\n\nPlease contact the administrator to continue using the VPN.'
+              : 'Your device has been blocked by the administrator.\n\nPlease contact the administrator to regain access.',
+          style: const TextStyle(fontSize: 14, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK', style: TextStyle(fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Hold-to-connect gesture ───────────────────────────────────────────────
 
   void _onHoldStart() {
     if (_connected) return;
@@ -90,24 +174,16 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
 
   void _onConnected() {
     _startVpn();
-    setState(() {
-      _connected = true;
-      _holding = false;
-      _colorProgress = 1.0;
-    });
-    _spinController.stop();
     HapticFeedback.heavyImpact();
   }
 
   void _onDisconnect() {
     _stopVpn();
-    setState(() {
-      _connected = false;
-      _colorProgress = 0.0;
-    });
-    _colorController.reverse(from: 1.0);
+    _resetToDisconnected();
     HapticFeedback.mediumImpact();
   }
+
+  // ── UI ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -269,7 +345,6 @@ class SunflowerPainter extends CustomPainter {
       progress,
     )!;
 
-    // Draw petals
     for (int i = 0; i < petalCount; i++) {
       final angle = (i / petalCount) * 2 * pi + spinAngle;
       final px = cx + cos(angle) * petalDist;
@@ -290,12 +365,7 @@ class SunflowerPainter extends CustomPainter {
       canvas.restore();
     }
 
-    // Center circles
-    canvas.drawCircle(
-      Offset(cx, cy),
-      centerRadius,
-      Paint()..color = centerColor,
-    );
+    canvas.drawCircle(Offset(cx, cy), centerRadius, Paint()..color = centerColor);
     canvas.drawCircle(Offset(cx, cy), innerRadius, Paint()..color = innerColor);
   }
 
