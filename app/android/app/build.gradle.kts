@@ -43,6 +43,7 @@ android {
             "\"${localProps["SERVER_IP"]}\"")
         buildConfigField("int", "SERVER_PORT", 
             "${localProps["SERVER_PORT"]}")
+        buildConfigField("long", "ROTATION_INTERVAL_SEC", "60L")
     }
     buildFeatures {
         buildConfig = true
@@ -61,6 +62,7 @@ android {
         release {
            
             signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("long", "ROTATION_INTERVAL_SEC", "3600L")
         }
     }
 }

@@ -52,6 +52,14 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       if (call.method == "onStatusChange") {
         final String status = call.arguments as String;
 
+        // ── reotated ────────────────────────────────────────────────
+        if (status == "denied:key_expired") {
+          // silently reconnect.
+          _resetToDisconnected();
+          Future.delayed(const Duration(milliseconds: 500), _onConnected);
+          return;
+        }
+
         // ── Denied / kicked ────────────────────────────────────────────────
         // Arrives either at startup or mid-session
         if (status == "denied" || status.startsWith("denied:")) {
