@@ -18,3 +18,11 @@ pubspec.lock
 # OS
 .DS_Store
 Thumbs.db
+
+app.zip
+*.zip
+
+server/
+server-2.0/
+server-3.0/
+

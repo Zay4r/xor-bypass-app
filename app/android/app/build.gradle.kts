@@ -1,5 +1,3 @@
-
-
 import java.util.Properties
 import java.io.FileInputStream
 
@@ -32,37 +30,54 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.app"
-         minSdk = flutter.minSdkVersion
+        minSdk = 26
         targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        buildConfigField("String", "MASTER_SECRET", 
+        // MASTER_SECRET is shared across all flavors
+        buildConfigField("String", "MASTER_SECRET",
             "\"${localProps["MASTER_SECRET"]}\"")
-        buildConfigField("String", "SERVER_IP", 
-            "\"${localProps["SERVER_IP"]}\"")
-        buildConfigField("int", "SERVER_PORT", 
-            "${localProps["SERVER_PORT"]}")
-        buildConfigField("long", "ROTATION_INTERVAL_SEC", "60L")
     }
+
     buildFeatures {
         buildConfig = true
     }
 
+    flavorDimensions += "env"
+
+    productFlavors {
+        create("sg") {
+            dimension = "env"
+            applicationId = "com.example.app.sg"
+            versionNameSuffix = "-sg"
+             buildConfigField("String", "SERVER_IP",
+                "\"${localProps["SG_SERVER_IP"]}\"")
+            buildConfigField("int",    "SERVER_PORT",           "${localProps["SERVER_PORT"]}")
+            buildConfigField("long",   "ROTATION_INTERVAL_SEC", "60L")
+        }
+        create("th") {
+            dimension = "env"
+            applicationId = "com.example.app.th"
+            versionNameSuffix = "-th"
+             buildConfigField("String", "SERVER_IP",
+                "\"${localProps["TH_SERVER_IP"]}\"")
+            buildConfigField("int",    "SERVER_PORT",           "${localProps["SERVER_PORT"]}")
+            buildConfigField("long",   "ROTATION_INTERVAL_SEC", "1983L")
+        }
+    }
+
     signingConfigs {
         create("release") {
-            keyAlias = keyProps["keyAlias"] as String
-            keyPassword = keyProps["keyPassword"] as String
-            storeFile = file(keyProps["storeFile"] as String)
+            keyAlias     = keyProps["keyAlias"]     as String
+            keyPassword  = keyProps["keyPassword"]  as String
+            storeFile    = file(keyProps["storeFile"] as String)
             storePassword = keyProps["storePassword"] as String
         }
     }
 
     buildTypes {
         release {
-           
             signingConfig = signingConfigs.getByName("debug")
-            buildConfigField("long", "ROTATION_INTERVAL_SEC", "3600L")
         }
     }
 }
