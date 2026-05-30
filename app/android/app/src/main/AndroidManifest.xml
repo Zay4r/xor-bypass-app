@@ -36,7 +36,8 @@
     android:name="com.example.app.XorVpnService"
     android:permission="android.permission.BIND_VPN_SERVICE"
     android:foregroundServiceType="specialUse"
-    android:exported="false">
+    android:exported="false"
+    tools:ignore="SpecialUseDescriptionRequired">
     <property
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="vpn"/>

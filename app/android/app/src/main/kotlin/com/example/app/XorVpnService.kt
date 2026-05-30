@@ -50,10 +50,11 @@ class XorVpnService : VpnService() {
             stopVpn()
             return START_NOT_STICKY
         }
+        if (running) return START_NOT_STICKY
         buildNumber = intent?.getStringExtra("buildNumber") ?: Build.FINGERPRINT
         startForegroundNotification()
         Thread { startVpn() }.start()
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -239,18 +240,13 @@ class XorVpnService : VpnService() {
     // -----------------------------------------------------------------------
 
     private fun stopVpn() {
-        if (!running && vpnInterface == null) return   // already stopped, avoid double-call
-        running = false
-
-        // Close the UDP socket first — this unblocks any receive() call in the
-        // recv thread so it exits cleanly instead of hanging forever.
-        try { udpSocket?.close() } catch (_: Exception) {}
-        udpSocket = null
-
-        // Close the TUN file descriptor — this tears down the virtual interface
-        // and restores normal Android routing immediately.
-        try { vpnInterface?.close() } catch (_: Exception) {}
-        vpnInterface = null
+        if (!running && vpnInterface == null) return
+    
+    try { vpnInterface?.close() } catch (_: Exception) {}
+    vpnInterface = null
+    running = false                    
+    try { udpSocket?.close() } catch (_: Exception) {}
+    udpSocket = null
 
         // Remove the foreground notification (API-safe for all versions we target)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -305,7 +301,7 @@ class XorVpnService : VpnService() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, notif, 0x40000000.toInt())
+            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIF_ID, notif)
         }
