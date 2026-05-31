@@ -33,7 +33,7 @@ class _Star {
   final double size;
   final double speed;
   final double brightness;
-  double dist; // distance from button outer edge
+  double dist;
 
   _Star({
     required this.angle,
@@ -67,22 +67,17 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   static const int    _seed      = 42;
   static const double _maxDist   = 1400.0;
 
-  // Button geometry — set once layout is known
-  Offset _buttonCenter = Offset.zero;
-  double _buttonOuterRadius = 0;
+  // Switch geometry — origin for starfield rays
+  Offset _switchCenter     = Offset.zero;
+  double _switchOriginRadius = 0;
 
   @override
   void initState() {
     super.initState();
 
     final rng = Random(_seed);
-    // Distribute stars evenly across all 4 corner directions so rays appear
-    // uniformly around the screen, not clustered at the bottom.
-    // Each star gets a base angle pointing toward one of the 4 corners
-    // (NE/NW/SE/SW = pi*0.25, pi*0.75, pi*1.25, pi*1.75) plus a random
-    // spread of ±50° so rays fan across the full corner zone.
     const cornerAngles = [pi * 0.25, pi * 0.75, pi * 1.25, pi * 1.75];
-    const cornerSpread = pi * 0.55; // ±55° from each corner center
+    const cornerSpread = pi * 0.55;
     _stars = List.generate(_starCount, (i) {
       final corner = cornerAngles[i % 4];
       final angle  = corner + (rng.nextDouble() - 0.5) * 2 * cornerSpread;
@@ -100,9 +95,6 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 2200),
     );
     _warpLevelController.addListener(() => setState(() {}));
-    _warpLevelController.addStatusListener((status) {
-      if (status == AnimationStatus.completed && _holding) _onConnected();
-    });
 
     _ticker = createTicker(_onTick);
     _ticker.start();
@@ -132,7 +124,6 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
     _lastElapsed = elapsed;
 
     final w = _warpLevelController.value;
-    // 20 px/s idle → 1000 px/s at full warp
     final baseSpeed = 20.0 + w * w * 980.0;
 
     for (final s in _stars) {
@@ -157,23 +148,10 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       0, duration: const Duration(milliseconds: 1200), curve: Curves.easeOut);
   }
 
-  void _onHoldStart() {
-    if (_connected) return;
-    setState(() => _holding = true);
-    _warpLevelController.forward(from: 0);
-  }
-
-  void _onHoldEnd() {
-    if (_connected) return;
-    setState(() => _holding = false);
-    _warpLevelController.animateBack(
-      0, duration: const Duration(milliseconds: 700), curve: Curves.easeOut);
-  }
-
   void _onConnected() {
     _startVpn();
     HapticFeedback.heavyImpact();
-    _warpLevelController.value = 1.0;
+    _warpLevelController.forward();
     setState(() { _connected = true; _holding = false; });
   }
 
@@ -188,13 +166,9 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
     final screen = MediaQuery.of(context).size;
     final w      = _warpLevelController.value;
 
-    // Button size mirrors _PowerButton calculation
-    final btnSize        = screen.width * 0.42;
-    final btnOuterRadius = btnSize * 0.48; // matches _PowerButtonPainter outerR
-
-    // Compute once; safe to overwrite every build (same values)
-    _buttonCenter      = Offset(screen.width / 2, screen.height / 2);
-    _buttonOuterRadius = btnOuterRadius;
+    // Starfield origin: center of screen (where switch lives)
+    _switchCenter      = Offset(screen.width / 2, screen.height - 160);
+    _switchOriginRadius = 40.0;
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
@@ -203,30 +177,74 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
         body: Stack(
           fit: StackFit.expand,
           children: [
+            // Background
             ColoredBox(color: Color.lerp(_navy, const Color(0xFF080F18), w)!),
 
-            // Warp streaks — full screen, origin = button outer edge
+            // Warp starfield
             RepaintBoundary(
               child: CustomPaint(
                 painter: StarfieldPainter(
                   stars:        _stars,
                   warp:         w,
-                  origin:       _buttonCenter,
-                  originRadius: _buttonOuterRadius,
+                  origin:       _switchCenter,
+                  originRadius: _switchOriginRadius,
                 ),
                 child: const SizedBox.expand(),
               ),
             ),
 
-            Center(
-              child: _PowerButton(
-                progress:     w,
-                connected:    _connected,
-                holding:      _holding,
-                screenWidth:  screen.width,
-                onHoldStart:  _onHoldStart,
-                onHoldEnd:    _onHoldEnd,
-                onDisconnect: _onDisconnect,
+            // Status label top-center
+            Positioned(
+              top: 80,
+              left: 0, right: 0,
+              child: Column(
+                children: [
+                  Text(
+                    _connected ? 'CONNECTED' : 'DISCONNECTED',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: _connected
+                          ? _red.withOpacity(0.9)
+                          : Colors.white.withOpacity(0.25),
+                      fontSize: 11,
+                      letterSpacing: 3,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+              ),
+            ),
+
+            // Light switch — bottom center
+            Positioned(
+              bottom: 80,
+              left: 0, right: 0,
+              child: Column(
+                children: [
+                  Text(
+                    _connected
+                        ? 'slide down to disconnect'
+                        : _holding
+                            ? 'connecting...'
+                            : 'slide up to connect',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.35),
+                      fontSize: 13,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Center(
+                    child: _LightSwitch(
+                      connected:    _connected,
+                      warpLevel:    w,
+                      onConnect:    _onConnected,
+                      onDisconnect: _onDisconnect,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -237,95 +255,186 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Power button
+// Light Switch
 // ══════════════════════════════════════════════════════════════════════════════
-class _PowerButton extends StatelessWidget {
-  final double progress, screenWidth;
-  final bool connected, holding;
-  final VoidCallback onHoldStart, onHoldEnd, onDisconnect;
 
-  const _PowerButton({
-    required this.progress, required this.connected, required this.holding,
-    required this.screenWidth, required this.onHoldStart,
-    required this.onHoldEnd, required this.onDisconnect,
+class _LightSwitch extends StatefulWidget {
+  final bool connected;
+  final double warpLevel;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+
+  const _LightSwitch({
+    required this.connected,
+    required this.warpLevel,
+    required this.onConnect,
+    required this.onDisconnect,
   });
 
   @override
+  State<_LightSwitch> createState() => _LightSwitchState();
+}
+
+class _LightSwitchState extends State<_LightSwitch> {
+  static const double _trackH = 160.0;
+  static const double _thumbD = 64.0;
+  static const double _travel = _trackH - _thumbD - 16.0; // ~80px
+
+  double _dragDelta = 0.0;
+  bool   _isDragging = false;
+
+  // 0.0 = bottom (disconnected), 1.0 = top (connected)
+  double get _thumbProgress {
+    final base = widget.connected ? 1.0 : 0.0;
+    final drag = _dragDelta / _travel;
+    return (base + drag).clamp(0.0, 1.0);
+  }
+
+  void _onPanStart(DragStartDetails d) {
+    setState(() { _isDragging = true; _dragDelta = 0.0; });
+  }
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    setState(() {
+      // drag up = negative dy = positive delta
+      _dragDelta = (_dragDelta - d.delta.dy).clamp(
+        widget.connected ? -_travel : 0.0,
+        widget.connected ?  0.0     : _travel,
+      );
+    });
+  }
+
+  void _onPanEnd(DragEndDetails d) {
+    final threshold = _travel * 0.4;
+    final delta = _dragDelta;
+    setState(() { _isDragging = false; _dragDelta = 0.0; });
+    if (!widget.connected && delta > threshold)  widget.onConnect();
+    else if (widget.connected && delta < -threshold) widget.onDisconnect();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final size = screenWidth * 0.42;
+    final p    = _thumbProgress;
+    final warp = widget.warpLevel;
+
+    final trackColor  = Color.lerp(const Color(0xFF0E2235), const Color(0xFF1A0808), warp)!;
+    final trackBorder = Color.lerp(const Color(0xFF1A3348), const Color(0xFF660000), p)!;
+    final thumbColor  = Color.lerp(const Color(0xFF152436), const Color(0xFFCC0000), p)!;
+    final thumbBorder = Color.lerp(const Color(0xFF1E3550), const Color(0xFFFF2222), p)!;
+    final iconColor   = Color.lerp(const Color(0xFF3A6080), _litText, p)!;
+
+    // p=0 → thumb at bottom, p=1 → thumb at top
+    final thumbOffset = (1.0 - p) * _travel;
+
     return GestureDetector(
-      onTapDown:   (_) => connected ? onDisconnect() : onHoldStart(),
-      onTapUp:     (_) => onHoldEnd(),
-      onTapCancel: onHoldEnd,
-      child: CustomPaint(
-        size: Size(size, size),
-        painter: _PowerButtonPainter(progress: progress),
+      onVerticalDragStart:  _onPanStart,
+      onVerticalDragUpdate: _onPanUpdate,
+      onVerticalDragEnd:    _onPanEnd,
+      child: Container(
+        width:  _thumbD + 24,
+        height: _trackH,
+        decoration: BoxDecoration(
+          color:        trackColor,
+          borderRadius: BorderRadius.circular(_trackH / 2),
+          border:       Border.all(color: trackBorder, width: 1.5),
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Top notch indicator
+            Positioned(
+              top: 10,
+              left: 0, right: 0,
+              child: Center(
+                child: Container(
+                  width: 20, height: 3,
+                  decoration: BoxDecoration(
+                    color:        trackBorder.withOpacity(0.6),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+            ),
+
+            // Thumb
+            Positioned(
+              top: thumbOffset + 8,
+              left: 0, right: 0,
+              child: Center(
+                child: Container(
+                  width:  _thumbD,
+                  height: _thumbD,
+                  decoration: BoxDecoration(
+                    shape:  BoxShape.circle,
+                    color:  thumbColor,
+                    border: Border.all(color: thumbBorder, width: 1.5),
+                    boxShadow: p > 0.05
+                        ? [BoxShadow(
+                            color:        _red.withOpacity(p * 0.50),
+                            blurRadius:   28 * p,
+                            spreadRadius: 4  * p,
+                          )]
+                        : null,
+                  ),
+                  child: Center(
+                    child: CustomPaint(
+                      size: const Size(24, 24),
+                      painter: _SunIconPainter(color: iconColor),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _PowerButtonPainter extends CustomPainter {
-  final double progress;
-  const _PowerButtonPainter({required this.progress});
+// ══════════════════════════════════════════════════════════════════════════════
+// Sun / power icon inside thumb
+// ══════════════════════════════════════════════════════════════════════════════
+
+class _SunIconPainter extends CustomPainter {
+  final Color color;
+  const _SunIconPainter({required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2, cy = size.height / 2;
-    final c  = Offset(cx, cy);
-    final outerR = size.width * 0.48;
-    final midR   = size.width * 0.38;
-    final innerR = size.width * 0.28;
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final p  = Paint()
+      ..color       = color
+      ..strokeWidth = 2.0
+      ..strokeCap   = StrokeCap.round
+      ..style       = PaintingStyle.stroke;
 
-    final ringColor = Color.lerp(const Color(0xFF1A2E42), const Color(0xFF990000), progress)!;
-    final fillColor = Color.lerp(const Color(0xFF0F2030), const Color(0xFFCC0000), progress)!;
-    final iconColor = Color.lerp(const Color(0xFF4A6080), _litText, progress)!;
-
-    if (progress > 0.05) {
-      canvas.drawCircle(c, outerR + 4 + progress * 18,
-        Paint()
-          ..color = _red.withOpacity(progress * 0.25)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 20));
+    // 8 rays
+    for (int i = 0; i < 8; i++) {
+      final a = (i / 8) * 2 * pi;
+      canvas.drawLine(
+        Offset(cx + cos(a) * 5,  cy + sin(a) * 5),
+        Offset(cx + cos(a) * 10, cy + sin(a) * 10),
+        p,
+      );
     }
-    canvas.drawCircle(c, outerR,
-      Paint()..color = ringColor.withOpacity(0.60)
-             ..style = PaintingStyle.stroke ..strokeWidth = 1.2);
-    canvas.drawCircle(c, midR,
-      Paint()..color = ringColor.withOpacity(0.30)
-             ..style = PaintingStyle.stroke ..strokeWidth = 0.8);
-    canvas.drawCircle(c, innerR, Paint()..color = fillColor);
-    canvas.drawCircle(c, innerR,
-      Paint()..shader = RadialGradient(
-        center: const Alignment(-0.4, -0.5), radius: 0.9,
-        colors: [Colors.white.withOpacity(0.08 * (1 - progress * 0.5)), Colors.transparent],
-      ).createShader(Rect.fromCircle(center: c, radius: innerR)));
-
-    final iconR = innerR * 0.52;
-    final ip = Paint()
-      ..color = iconColor ..style = PaintingStyle.stroke
-      ..strokeWidth = size.width * 0.022 ..strokeCap = StrokeCap.round;
-    canvas.drawArc(Rect.fromCircle(center: c, radius: iconR), -pi * 0.75, pi * 1.5, false, ip);
-    canvas.drawLine(Offset(cx, cy - iconR * 0.38), Offset(cx, cy - iconR * 1.12), ip);
+    canvas.drawCircle(Offset(cx, cy), 3.5, Paint()..color = color);
   }
 
   @override
-  bool shouldRepaint(_PowerButtonPainter o) => o.progress != progress;
+  bool shouldRepaint(_SunIconPainter o) => o.color != color;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // StarfieldPainter
-//
-// Every star is positioned at:
-//   origin  +  direction(angle)  *  (originRadius + dist)
-//
-// So dist=0 is exactly on the button's outer ring, and streaks shoot outward
-// from there — pure Star Wars hyperspace jump from the button edge.
 // ══════════════════════════════════════════════════════════════════════════════
+
 class StarfieldPainter extends CustomPainter {
   final List<_Star> stars;
   final double      warp;
-  final Offset      origin;       // screen-space button center
-  final double      originRadius; // button outer ring radius
+  final Offset      origin;
+  final double      originRadius;
 
   const StarfieldPainter({
     required this.stars,
@@ -339,11 +448,8 @@ class StarfieldPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Clip away a large circle around the button so no rays appear near it.
-    // Stars whose ray would hit the center zone are skipped entirely.
     final clearance = originRadius * 8.5;
 
-    // Clip: full screen minus the button exclusion circle
     final clipPath = Path()
       ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
       ..addOval(Rect.fromCircle(center: origin, radius: clearance))
@@ -351,7 +457,6 @@ class StarfieldPainter extends CustomPainter {
     canvas.save();
     canvas.clipPath(clipPath);
 
-    // Soft bloom ring around button at warp
     if (warp > 0.08) {
       final bt = ((warp - 0.08) / 0.92).clamp(0.0, 1.0);
       final br = originRadius * (1.0 + _easeOut(bt) * 2.8);
@@ -366,40 +471,29 @@ class StarfieldPainter extends CustomPainter {
     for (final s in stars) {
       final dx = cos(s.angle);
       final dy = sin(s.angle);
-
-      // Head of streak starts at clearance boundary (uniform all directions)
       final headDist = clearance + s.dist;
       final hx = origin.dx + dx * headDist;
       final hy = origin.dy + dy * headDist;
 
       if (warp < 0.05) {
-        // Idle: tiny dot drifting outward from button ring
         final fade = (s.dist / 600.0).clamp(0.0, 1.0);
         canvas.drawCircle(Offset(hx, hy), s.size * 0.75,
           Paint()..color = Colors.white.withOpacity(s.brightness * (0.15 + 0.85 * fade)));
         continue;
       }
 
-      // Wedge: wide at the button ring, tapers to a point at the tail.
-      // spread controls the half-angle of the fan — bigger = wider beams.
       final streakLen = _easeIn(warp) * 520 * s.speed;
       final tailDist  = headDist + streakLen;
-
-      // Half-angle at the root (button ring). At warp=1 each beam is ~12° wide.
-      final spread = 0.012 * warp;
-
+      final spread    = 0.012 * warp;
       final aL = s.angle - spread;
       final aR = s.angle + spread;
 
-      // Two points at the button ring (wide base of the wedge)
       final rootLx = origin.dx + cos(aL) * headDist;
       final rootLy = origin.dy + sin(aL) * headDist;
       final rootRx = origin.dx + cos(aR) * headDist;
       final rootRy = origin.dy + sin(aR) * headDist;
-
-      // One point at the tip (far end)
-      final tipX = origin.dx + cos(s.angle) * tailDist;
-      final tipY = origin.dy + sin(s.angle) * tailDist;
+      final tipX   = origin.dx + cos(s.angle) * tailDist;
+      final tipY   = origin.dy + sin(s.angle) * tailDist;
 
       final path = Path()
         ..moveTo(rootLx, rootLy)
@@ -408,7 +502,6 @@ class StarfieldPainter extends CustomPainter {
         ..close();
 
       final alpha = s.brightness * (0.45 + 0.55 * warp);
-
       canvas.drawPath(path,
         Paint()
           ..style  = PaintingStyle.fill
@@ -429,7 +522,6 @@ class StarfieldPainter extends CustomPainter {
 
     canvas.restore();
 
-    // Dark tunnel vignette — deepens from button edge outward at full warp
     if (warp > 0.55) {
       final t  = ((warp - 0.55) / 0.45).clamp(0.0, 1.0);
       final vr = originRadius + (size.longestSide - originRadius) * 0.9;
