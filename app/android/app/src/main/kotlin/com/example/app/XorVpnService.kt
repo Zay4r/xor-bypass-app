@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -39,6 +40,12 @@ class XorVpnService : VpnService() {
 
     companion object {
         var flutterChannel: MethodChannel? = null
+
+        private val TARGET_PACKAGES = listOf(
+            "com.facebook.katana",
+            "com.facebook.lite",
+            "com.facebook.orca",
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -93,6 +100,13 @@ class XorVpnService : VpnService() {
             builder.allowFamily(android.system.OsConstants.AF_INET)
             builder.setSession(VpnConfig.SESSION_NAME)
             builder.setMtu(VpnConfig.MTU)
+
+            val allowedAppCount = addAllowedTargetApps(builder)
+            if (allowedAppCount == 0) {
+                notify("error: Facebook is not installed")
+                stopVpn()
+                return
+            }
 
             vpnInterface = builder.establish() ?: run {
                 notify("error: VPN permission not granted")
@@ -235,12 +249,26 @@ class XorVpnService : VpnService() {
     return Pair(data[0], data.sliceArray(2 until data.size))
 }
 
+    private fun addAllowedTargetApps(builder: Builder): Int {
+        var count = 0
+        for (packageName in TARGET_PACKAGES) {
+            try {
+                builder.addAllowedApplication(packageName)
+                count++
+                Log.d(TAG, "Routing $packageName through the VPN")
+            } catch (_: PackageManager.NameNotFoundException) {
+                Log.d(TAG, "Target app is not installed: $packageName")
+            }
+        }
+        return count
+    }
+
     // -----------------------------------------------------------------------
     // Stop
     // -----------------------------------------------------------------------
 
     private fun stopVpn() {
-        if (!running && vpnInterface == null) return
+        if (!running && vpnInterface == null && udpSocket == null) return
     
     try { vpnInterface?.close() } catch (_: Exception) {}
     vpnInterface = null
@@ -295,7 +323,7 @@ class XorVpnService : VpnService() {
             @Suppress("DEPRECATION") Notification.Builder(this)
         }
             .setContentTitle("XorVPN Active")
-            .setContentText("Tunnel is running")
+            .setContentText("Facebook traffic is protected")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .addAction(android.R.drawable.ic_delete, "Disconnect", stopIntent)
             .build()
