@@ -1,6 +1,7 @@
 package com.example.app
 
 import android.app.AppOpsManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Process
@@ -11,11 +12,15 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 
-    private val channelName = "com.example.app/vpn"
     private val vpnRequestCode = 1001
 
     private lateinit var methodChannel: MethodChannel
     private var waitingForUsageAccess = false
+    private var pendingDeviceId: String? = null
+    private var pendingPublicKey: String? = null
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine =
+        (application as XorVpnApplication).flutterEngine
 
     override fun onResume() {
         super.onResume()
@@ -32,12 +37,23 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        methodChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            XorVpnApplication.CHANNEL_NAME,
+        )
         XorVpnService.flutterChannel = methodChannel
 
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "connect" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val publicKey = call.argument<String>("publicKey")
+                    if (deviceId == null || publicKey == null) {
+                        result.error("invalid_identity", "Device identity is missing", null)
+                        return@setMethodCallHandler
+                    }
+                    pendingDeviceId = deviceId
+                    pendingPublicKey = publicKey
                     requestConnect()
                     result.success(null)
                 }
@@ -82,8 +98,16 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun launchVpnService() {
+        val deviceId = pendingDeviceId
+        val publicKey = pendingPublicKey
+        pendingDeviceId = null
+        pendingPublicKey = null
+        if (deviceId == null || publicKey == null) {
+            methodChannel.invokeMethod("onStatusChange", "error: Device identity unavailable")
+            return
+        }
         VpnActions.startMonitor(this)
-        VpnActions.startVpn(this)
+        VpnActions.startVpn(this, deviceId, publicKey)
         methodChannel.invokeMethod("onStatusChange", "connecting")
     }
 

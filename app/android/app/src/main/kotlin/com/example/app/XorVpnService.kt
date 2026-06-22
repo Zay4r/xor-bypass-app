@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.util.Base64
 import io.flutter.plugin.common.MethodChannel
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -17,14 +18,22 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import android.content.pm.ServiceInfo
 import android.os.Build
+import org.json.JSONObject
+import java.net.SocketTimeoutException
+import java.security.MessageDigest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG           = "XorVpnService"
 private const val NOTIF_CHANNEL = "xor_vpn"
 private const val NOTIF_ID      = 1
 
 // Packet type constants — must match server Crypto.go exactly
-private const val PKT_AUTH      = 0x01.toByte()
+private const val PKT_AUTH_HELLO = 0x01.toByte()
 private const val PKT_DATA      = 0x02.toByte()
+private const val PKT_AUTH_CHALLENGE = 0x03.toByte()
+private const val PKT_AUTH_PROOF = 0x04.toByte()
 private const val PKT_AUTH_OK   = 0xA0.toByte()
 private const val PKT_AUTH_DENY = 0xA1.toByte()
 
@@ -33,11 +42,19 @@ class XorVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var udpSocket: DatagramSocket? = null
     private var running      = false
-    // Device build number
     private var buildNumber = ""
+    private var deviceId = ""
+    private var publicKey = ""
+    private val startLock = Any()
+    private var handshakeInProgress = false
 
     companion object {
         var flutterChannel: MethodChannel? = null
+
+        private const val AUTH_MAX_ATTEMPTS = 3
+        private const val AUTH_PACKET_TIMEOUT_MS = 5_000L
+        private const val SIGNING_TIMEOUT_MS = 5_000L
+        private const val AUTH_RETRY_DELAY_MS = 1_000L
 
         private val TARGET_PACKAGES = listOf(
             "com.facebook.katana",
@@ -55,8 +72,13 @@ class XorVpnService : VpnService() {
             stopVpn()
             return START_NOT_STICKY
         }
-        if (running) return START_NOT_STICKY
+        synchronized(startLock) {
+            if (running || handshakeInProgress) return START_NOT_STICKY
+            handshakeInProgress = true
+        }
         buildNumber = intent?.getStringExtra("buildNumber") ?: Build.FINGERPRINT
+        deviceId = intent?.getStringExtra("deviceId").orEmpty()
+        publicKey = intent?.getStringExtra("publicKey").orEmpty()
         startForegroundNotification()
         Thread { startVpn() }.start()
         return START_NOT_STICKY
@@ -81,9 +103,9 @@ class XorVpnService : VpnService() {
             protect(socket)
 
             // ── Step 1: Auth handshake ─────────────────────────────────────
-            udpSocket!!.soTimeout = 10_000
-            if (!performAuth(socket, serverAddr)) {
-                notify("denied")
+            val denialReason = performAuth(socket, serverAddr)
+            if (denialReason != null) {
+                notify("denied:$denialReason")
                 stopVpn()
                 return
             }
@@ -153,7 +175,7 @@ class XorVpnService : VpnService() {
 
                             PKT_AUTH_DENY -> {
                                 // Server kicked us mid-session (blocked or expired).
-                                val reason = payload.toString(Charsets.UTF_8).trim()
+                                val reason = denialReason(payload)
                                 Log.w(TAG, "Mid-session kick received — reason: $reason")
                                 // notify Flutter first, then tear down everything via stopVpn()
                                 notify("denied:$reason")
@@ -173,6 +195,13 @@ class XorVpnService : VpnService() {
             Log.e(TAG, "Fatal tunnel error: ${e.message}", e)
             notify("error: ${e.message}")
             stopSelf()
+        } finally {
+            synchronized(startLock) {
+                handshakeInProgress = false
+            }
+            buildNumber = ""
+            deviceId = ""
+            publicKey = ""
         }
     }
 
@@ -180,44 +209,146 @@ class XorVpnService : VpnService() {
     // Auth handshake
     // -----------------------------------------------------------------------
 
-   private fun performAuth(socket: DatagramSocket, serverAddr: InetAddress): Boolean {
-    val recvBuf = ByteArray(VpnConfig.MAX_UDP_PACKET_SIZE)
+    private fun performAuth(socket: DatagramSocket, serverAddr: InetAddress): String? {
+        requireValidPublicIdentity()
+        val hello = JSONObject()
+            .put("build_number", buildNumber)
+            .put("device_id", deviceId)
+            .put("public_key", publicKey)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
 
-    repeat(3) { attempt ->
-        Log.d(TAG, "Auth attempt ${attempt + 1}/3  build=$buildNumber")
-        try {
-            val authPkt = VpnConfig.encryptPacket(
-                PKT_AUTH,
-                buildNumber.toByteArray(Charsets.UTF_8),
-            )
-            socket.send(DatagramPacket(authPkt, authPkt.size, serverAddr, VpnConfig.SERVER_PORT))
-
-            val reply = DatagramPacket(recvBuf, recvBuf.size)
-            socket.receive(reply)
-
-            val raw = recvBuf.copyOf(reply.length)
-            val (type, payload) = VpnConfig.decryptPacket(raw) ?: return@repeat
-            return when (type) {
-                PKT_AUTH_OK   -> {
-                    if (payload.contentEquals("OK".toByteArray(Charsets.UTF_8))) {
-                        Log.d(TAG, "Auth OK")
-                        true
-                    } else {
-                        Log.w(TAG, "AUTH_OK had an unexpected authenticated payload")
-                        false
-                    }
+        repeat(AUTH_MAX_ATTEMPTS) { attempt ->
+            var challengeId: ByteArray? = null
+            var challenge: ByteArray? = null
+            try {
+                Log.d(TAG, "Authentication attempt ${attempt + 1}/$AUTH_MAX_ATTEMPTS")
+                sendEncrypted(socket, serverAddr, PKT_AUTH_HELLO, hello)
+                val challengePacket = receiveAuthenticatedPacket(socket)
+                if (challengePacket.first == PKT_AUTH_DENY) {
+                    return denialReason(challengePacket.second)
                 }
-                PKT_AUTH_DENY -> { Log.w(TAG, "Auth DENIED — trial expired or blocked"); false }
-                else          -> { Log.w(TAG, "Unknown auth response 0x${type.toString(16)}"); false }
+                if (challengePacket.first != PKT_AUTH_CHALLENGE) {
+                    throw IllegalStateException("Expected AUTH_CHALLENGE")
+                }
+
+                val challengeJson = JSONObject(challengePacket.second.toString(Charsets.UTF_8))
+                challengeId = Base64.decode(challengeJson.getString("challenge_id"), Base64.DEFAULT)
+                challenge = Base64.decode(challengeJson.getString("challenge"), Base64.DEFAULT)
+                if (challengeId.size != 16 || challenge.size != 32) {
+                    throw IllegalArgumentException("Malformed authentication challenge")
+                }
+
+                val signatureBytes = Base64.decode(
+                    requestSignature(challengeId, challenge),
+                    Base64.DEFAULT,
+                )
+                if (signatureBytes.size != 64) {
+                    throw IllegalStateException("Invalid authentication signature")
+                }
+                val proof = JSONObject()
+                    .put("challenge_id", Base64.encodeToString(challengeId, Base64.NO_WRAP))
+                    .put("signature", Base64.encodeToString(signatureBytes, Base64.NO_WRAP))
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+                sendEncrypted(socket, serverAddr, PKT_AUTH_PROOF, proof)
+
+                val result = receiveAuthenticatedPacket(socket)
+                when (result.first) {
+                    PKT_AUTH_OK -> return null
+                    PKT_AUTH_DENY -> return denialReason(result.second)
+                    else -> throw IllegalStateException("Expected AUTH_OK or AUTH_DENY")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Authentication attempt ${attempt + 1} failed: ${e.javaClass.simpleName}")
+                if (attempt + 1 < AUTH_MAX_ATTEMPTS) Thread.sleep(AUTH_RETRY_DELAY_MS)
+            } finally {
+                challengeId?.fill(0)
+                challenge?.fill(0)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Auth attempt ${attempt + 1} failed: ${e.message}")
-            Thread.sleep(2_000)
+        }
+        return "authentication_timeout"
+    }
+
+    private fun requireValidPublicIdentity() {
+        require(deviceId.matches(Regex("[0-9a-f]{64}"))) { "Invalid device ID" }
+        val publicKeyBytes = Base64.decode(publicKey, Base64.DEFAULT)
+        require(publicKeyBytes.size == 32) {
+            "Invalid Ed25519 public key"
+        }
+        val expectedDeviceId = MessageDigest.getInstance("SHA-256")
+            .digest(publicKeyBytes)
+            .joinToString("") { "%02x".format(it) }
+        require(deviceId == expectedDeviceId) { "Device identity mismatch" }
+    }
+
+    private fun sendEncrypted(
+        socket: DatagramSocket,
+        serverAddr: InetAddress,
+        type: Byte,
+        payload: ByteArray,
+    ) {
+        val packet = VpnConfig.encryptPacket(type, payload)
+        socket.send(DatagramPacket(packet, packet.size, serverAddr, VpnConfig.SERVER_PORT))
+    }
+
+    private fun receiveAuthenticatedPacket(socket: DatagramSocket): Pair<Byte, ByteArray> {
+        val deadline = System.currentTimeMillis() + AUTH_PACKET_TIMEOUT_MS
+        val buffer = ByteArray(VpnConfig.MAX_UDP_PACKET_SIZE)
+        while (true) {
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) throw SocketTimeoutException("Authentication timed out")
+            socket.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val reply = DatagramPacket(buffer, buffer.size)
+            socket.receive(reply)
+            val authenticated = VpnConfig.decryptPacket(buffer.copyOf(reply.length))
+            if (authenticated != null) return authenticated
         }
     }
-    Log.e(TAG, "All auth attempts exhausted")
-    return false
-}   
+
+    private fun requestSignature(challengeId: ByteArray, challenge: ByteArray): String {
+        val channel = flutterChannel ?: error("Flutter authentication channel unavailable")
+        val latch = CountDownLatch(1)
+        val signature = AtomicReference<String?>()
+        val failure = AtomicReference<String?>()
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            channel.invokeMethod(
+                "signAuthChallenge",
+                mapOf(
+                    "buildNumber" to buildNumber,
+                    "challengeId" to Base64.encodeToString(challengeId, Base64.NO_WRAP),
+                    "challenge" to Base64.encodeToString(challenge, Base64.NO_WRAP),
+                ),
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        signature.set(result as? String)
+                        latch.countDown()
+                    }
+
+                    override fun error(code: String, message: String?, details: Any?) {
+                        failure.set(code)
+                        latch.countDown()
+                    }
+
+                    override fun notImplemented() {
+                        failure.set("not_implemented")
+                        latch.countDown()
+                    }
+                },
+            )
+        }
+        if (!latch.await(SIGNING_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            throw SocketTimeoutException("Signing timed out")
+        }
+        failure.get()?.let { error("Signing failed: $it") }
+        return signature.get() ?: error("Signing returned no signature")
+    }
+
+    private fun denialReason(payload: ByteArray): String {
+        val text = payload.toString(Charsets.UTF_8).trim()
+        val parsed = runCatching { JSONObject(text).optString("reason") }.getOrNull()
+        return (parsed?.takeIf { it.isNotBlank() } ?: text).ifBlank { "denied" }
+    }
 
     private fun addAllowedTargetApps(builder: Builder): Int {
         var count = 0

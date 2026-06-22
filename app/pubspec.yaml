@@ -10,7 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
+  cryptography: ^2.7.0
   flutter_earth_globe: ^2.2.1
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:
