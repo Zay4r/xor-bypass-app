@@ -9,6 +9,7 @@ import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
 
@@ -46,16 +47,53 @@ class MainActivity : FlutterActivity() {
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "connect" -> {
-                    val deviceId = call.argument<String>("deviceId")
-                    val publicKey = call.argument<String>("publicKey")
-                    if (deviceId == null || publicKey == null) {
-                        result.error("invalid_identity", "Device identity is missing", null)
+                    parseIdentity(call.arguments)?.let {
+                        continueConnect(it.first, it.second)
+                        result.success(null)
                         return@setMethodCallHandler
                     }
-                    pendingDeviceId = deviceId
-                    pendingPublicKey = publicKey
-                    requestConnect()
-                    result.success(null)
+                    VpnActions.cachedIdentity(this)?.let {
+                        continueConnect(it.first, it.second)
+                        result.success(null)
+                        return@setMethodCallHandler
+                    }
+
+                    methodChannel.invokeMethod(
+                        "getDeviceIdentity",
+                        null,
+                        object : MethodChannel.Result {
+                            override fun success(identityPayload: Any?) {
+                                val identity = parseIdentity(identityPayload)
+                                if (identity == null) {
+                                    VpnActions.cachedIdentity(this@MainActivity)?.let {
+                                        continueConnect(it.first, it.second)
+                                        result.success(null)
+                                        return
+                                    }
+                                    result.error(
+                                        "invalid_identity",
+                                        "Device identity is missing",
+                                        null,
+                                    )
+                                    return
+                                }
+                                continueConnect(identity.first, identity.second)
+                                result.success(null)
+                            }
+
+                            override fun error(code: String, message: String?, details: Any?) {
+                                result.error(code, message, details)
+                            }
+
+                            override fun notImplemented() {
+                                result.error(
+                                    "invalid_identity",
+                                    "Device identity provider is unavailable",
+                                    null,
+                                )
+                            }
+                        },
+                    )
                 }
 
                 "disconnect" -> {
@@ -86,6 +124,41 @@ class MainActivity : FlutterActivity() {
             return
         }
         requestVpnPermission()
+    }
+
+    private fun continueConnect(deviceId: String, publicKey: String) {
+        pendingDeviceId = deviceId
+        pendingPublicKey = publicKey
+        requestConnect()
+    }
+
+    private fun parseIdentity(arguments: Any?): Pair<String, String>? {
+        val identity = when (arguments) {
+            is String -> runCatching {
+                val json = JSONObject(arguments)
+                Pair(
+                    json.optString("deviceId").takeIf { it.isNotBlank() },
+                    json.optString("publicKey").takeIf { it.isNotBlank() },
+                )
+            }.getOrElse { Pair(null, null) }
+            is List<*> -> Pair(
+                arguments.getOrNull(0) as? String,
+                arguments.getOrNull(1) as? String,
+            )
+            is Map<*, *> -> Pair(
+                arguments["deviceId"] as? String,
+                arguments["publicKey"] as? String,
+            )
+            else -> Pair(null, null)
+        }
+
+        val deviceId = identity.first
+        val publicKey = identity.second
+        return if (deviceId.isNullOrBlank() || publicKey.isNullOrBlank()) {
+            null
+        } else {
+            Pair(deviceId, publicKey)
+        }
     }
 
     private fun requestVpnPermission() {

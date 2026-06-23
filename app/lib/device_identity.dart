@@ -13,10 +13,15 @@ final class DeviceIdentityInfo {
 /// Owns all device private-key loading, generation, and signing operations.
 final class DeviceIdentity {
   DeviceIdentity({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+    : _storage =
+          storage ?? const FlutterSecureStorage(aOptions: _androidOptions);
 
   static const _privateKeyStorageKey = 'ed25519_device_private_key_v1';
   static const _signingContext = 'xor-vpn-auth-v1';
+  static const _androidOptions = AndroidOptions(
+    encryptedSharedPreferences: true,
+    resetOnError: true,
+  );
 
   final FlutterSecureStorage _storage;
   final Ed25519 _algorithm = Ed25519();

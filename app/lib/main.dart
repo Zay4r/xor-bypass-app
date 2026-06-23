@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'dart:convert';
 import 'dart:math';
 
 import 'device_identity.dart';
@@ -63,10 +64,16 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   Future<void> _startVpn() async {
     try {
       final identity = await _deviceIdentity.getIdentity();
-      await _channel.invokeMethod('connect', <String, String>{
-        'deviceId': identity.deviceId,
-        'publicKey': identity.publicKey,
-      });
+      if (identity.deviceId.isEmpty || identity.publicKey.isEmpty) {
+        throw StateError('Device identity is missing');
+      }
+      await _channel.invokeMethod(
+        'connect',
+        jsonEncode(<String, String>{
+          'deviceId': identity.deviceId,
+          'publicKey': identity.publicKey,
+        }),
+      );
     } catch (_) {
       if (mounted) _resetToDisconnected();
     }
@@ -116,6 +123,13 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
     _ticker.start();
 
     _channel.setMethodCallHandler((call) async {
+      if (call.method == 'getDeviceIdentity') {
+        final identity = await _deviceIdentity.getIdentity();
+        return jsonEncode(<String, String>{
+          'deviceId': identity.deviceId,
+          'publicKey': identity.publicKey,
+        });
+      }
       if (call.method == 'signAuthChallenge') {
         final arguments = Map<String, Object?>.from(call.arguments as Map);
         return _deviceIdentity.signChallenge(

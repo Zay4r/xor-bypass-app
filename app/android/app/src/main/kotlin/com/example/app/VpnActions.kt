@@ -30,10 +30,19 @@ object VpnActions {
 
     // Only public identity metadata is cached here for monitor-triggered reconnects.
     fun startVpn(context: Context) {
-        val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val deviceId = preferences.getString(DEVICE_ID_KEY, null) ?: return
-        val publicKey = preferences.getString(PUBLIC_KEY_KEY, null) ?: return
+        val (deviceId, publicKey) = cachedIdentity(context) ?: return
         startVpn(context, deviceId, publicKey)
+    }
+
+    fun cachedIdentity(context: Context): Pair<String, String>? {
+        val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val deviceId = preferences.getString(DEVICE_ID_KEY, null)
+        val publicKey = preferences.getString(PUBLIC_KEY_KEY, null)
+        return if (deviceId.isNullOrBlank() || publicKey.isNullOrBlank()) {
+            null
+        } else {
+            Pair(deviceId, publicKey)
+        }
     }
 
     fun stopVpn(context: Context) {

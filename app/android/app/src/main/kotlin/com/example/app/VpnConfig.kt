@@ -12,11 +12,8 @@ import javax.crypto.spec.SecretKeySpec
 object VpnConfig {
     val SERVER_IP: String = BuildConfig.SERVER_IP
     val SERVER_PORT: Int = BuildConfig.SERVER_PORT
-    const val TUNNEL_IP = "10.1.0.3" // rendezvous
-    const val TUNNEL_PREFIX = 24
     const val DNS_SERVER = "8.8.8.8" // googler
     const val SESSION_NAME = "XorVPN"
-    const val MTU = 1200
     const val MAX_UDP_PACKET_SIZE = 1530 // 1500-byte payload + 30-byte protocol overhead
 
     private const val TAG = "VpnConfig"

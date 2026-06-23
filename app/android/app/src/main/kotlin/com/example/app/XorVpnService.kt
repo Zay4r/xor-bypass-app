@@ -6,24 +6,24 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import android.util.Base64
+import android.util.Log
 import io.flutter.plugin.common.MethodChannel
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import android.content.pm.ServiceInfo
-import android.os.Build
-import org.json.JSONObject
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONObject
 
 private const val TAG           = "XorVpnService"
 private const val NOTIF_CHANNEL = "xor_vpn"
@@ -37,16 +37,25 @@ private const val PKT_AUTH_PROOF = 0x04.toByte()
 private const val PKT_AUTH_OK   = 0xA0.toByte()
 private const val PKT_AUTH_DENY = 0xA1.toByte()
 
+private data class AuthResult(
+    val tunnelIp: String,
+    val prefixLength: Int,
+    val mtu: Int,
+)
+
+private class AuthDeniedException(val reason: String) : Exception(reason)
+
 class XorVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var udpSocket: DatagramSocket? = null
-    private var running      = false
+    private var running = false
     private var buildNumber = ""
     private var deviceId = ""
     private var publicKey = ""
     private val startLock = Any()
     private var handshakeInProgress = false
+    private var assignedAuthResult: AuthResult? = null
 
     companion object {
         var flutterChannel: MethodChannel? = null
@@ -103,21 +112,23 @@ class XorVpnService : VpnService() {
             protect(socket)
 
             // ── Step 1: Auth handshake ─────────────────────────────────────
-            val denialReason = performAuth(socket, serverAddr)
-            if (denialReason != null) {
-                notify("denied:$denialReason")
+            val authResult = try {
+                performAuth(socket, serverAddr)
+            } catch (e: AuthDeniedException) {
+                notify("denied:${e.reason}")
                 stopVpn()
                 return
             }
+            assignedAuthResult = authResult
             udpSocket!!.soTimeout = 0
             // ── Step 2: Build TUN interface ────────────────────────────────
             val builder = Builder()
-            builder.addAddress(VpnConfig.TUNNEL_IP, VpnConfig.TUNNEL_PREFIX)
+            builder.addAddress(authResult.tunnelIp, authResult.prefixLength)
             builder.addDnsServer(VpnConfig.DNS_SERVER)
             builder.addRoute("0.0.0.0", 0)
             builder.allowFamily(android.system.OsConstants.AF_INET)
             builder.setSession(VpnConfig.SESSION_NAME)
-            builder.setMtu(VpnConfig.MTU)
+            builder.setMtu(authResult.mtu)
 
             val allowedAppCount = addAllowedTargetApps(builder)
             if (allowedAppCount == 0) {
@@ -128,6 +139,7 @@ class XorVpnService : VpnService() {
 
             vpnInterface = builder.establish() ?: run {
                 notify("error: VPN permission not granted")
+                stopVpn()
                 return
             }
 
@@ -136,22 +148,24 @@ class XorVpnService : VpnService() {
 
             // ── Step 3: phone → encrypt → server ──────────────────────────
             Thread {
-    val sock   = udpSocket ?: return@Thread
-    val buffer = ByteArray(VpnConfig.MTU)
-    val input  = FileInputStream(vpnInterface!!.fileDescriptor)
-    while (running) {
-        try {
-            val n = input.read(buffer)
-            if (n <= 0) continue
+                val sock = udpSocket ?: return@Thread
+                val buffer = ByteArray(authResult.mtu)
+                val input = FileInputStream(vpnInterface!!.fileDescriptor)
+                while (running) {
+                    try {
+                        val n = input.read(buffer)
+                        if (n <= 0) continue
 
-            val wrapped = VpnConfig.encryptPacket(PKT_DATA, buffer.copyOf(n))
+                        val wrapped = VpnConfig.encryptPacket(PKT_DATA, buffer.copyOf(n))
 
-            sock.send(DatagramPacket(wrapped, wrapped.size, serverAddr, VpnConfig.SERVER_PORT))
-        } catch (e: Exception) {
-            if (running) Log.w(TAG, "Send error: ${e.message}")
-        }
-    }
-}.start()
+                        sock.send(
+                            DatagramPacket(wrapped, wrapped.size, serverAddr, VpnConfig.SERVER_PORT),
+                        )
+                    } catch (e: Exception) {
+                        if (running) Log.w(TAG, "Send error: ${e.message}")
+                    }
+                }
+            }.start()
 
             // ── Step 4: server → decrypt → phone ──────────────────────────
             // Also handles mid-session PKT_AUTH_DENY kick from the server.
@@ -209,7 +223,7 @@ class XorVpnService : VpnService() {
     // Auth handshake
     // -----------------------------------------------------------------------
 
-    private fun performAuth(socket: DatagramSocket, serverAddr: InetAddress): String? {
+    private fun performAuth(socket: DatagramSocket, serverAddr: InetAddress): AuthResult {
         requireValidPublicIdentity()
         val hello = JSONObject()
             .put("build_number", buildNumber)
@@ -226,7 +240,7 @@ class XorVpnService : VpnService() {
                 sendEncrypted(socket, serverAddr, PKT_AUTH_HELLO, hello)
                 val challengePacket = receiveAuthenticatedPacket(socket)
                 if (challengePacket.first == PKT_AUTH_DENY) {
-                    return denialReason(challengePacket.second)
+                    throw AuthDeniedException(denialReason(challengePacket.second))
                 }
                 if (challengePacket.first != PKT_AUTH_CHALLENGE) {
                     throw IllegalStateException("Expected AUTH_CHALLENGE")
@@ -255,10 +269,12 @@ class XorVpnService : VpnService() {
 
                 val result = receiveAuthenticatedPacket(socket)
                 when (result.first) {
-                    PKT_AUTH_OK -> return null
-                    PKT_AUTH_DENY -> return denialReason(result.second)
+                    PKT_AUTH_OK -> return parseAuthOk(result.second)
+                    PKT_AUTH_DENY -> throw AuthDeniedException(denialReason(result.second))
                     else -> throw IllegalStateException("Expected AUTH_OK or AUTH_DENY")
                 }
+            } catch (e: AuthDeniedException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Authentication attempt ${attempt + 1} failed: ${e.javaClass.simpleName}")
                 if (attempt + 1 < AUTH_MAX_ATTEMPTS) Thread.sleep(AUTH_RETRY_DELAY_MS)
@@ -267,7 +283,66 @@ class XorVpnService : VpnService() {
                 challenge?.fill(0)
             }
         }
-        return "authentication_timeout"
+        throw IllegalStateException("Authentication failed")
+    }
+
+    private fun parseAuthOk(payload: ByteArray): AuthResult {
+        val json = JSONObject(payload.toString(Charsets.UTF_8))
+        val status = json.requireString("status")
+        require(status == "OK") { "Malformed AUTH_OK status" }
+
+        val tunnelIp = json.requireString("tunnel_ip")
+        requireValidTunnelIp(tunnelIp)
+
+        val prefixLength = json.requireInt("prefix_length")
+        require(prefixLength == 24) { "Malformed AUTH_OK prefix length" }
+
+        val mtu = json.requireInt("mtu")
+        require(mtu in 576..1500) { "Malformed AUTH_OK MTU" }
+
+        return AuthResult(
+            tunnelIp = tunnelIp,
+            prefixLength = prefixLength,
+            mtu = mtu,
+        )
+    }
+
+    private fun JSONObject.requireString(name: String): String {
+        require(has(name)) { "Missing AUTH_OK field: $name" }
+        val value = get(name)
+        require(value is String) { "Malformed AUTH_OK field: $name" }
+        return value
+    }
+
+    private fun JSONObject.requireInt(name: String): Int {
+        require(has(name)) { "Missing AUTH_OK field: $name" }
+        val value = get(name)
+        require(value is Int) { "Malformed AUTH_OK field: $name" }
+        return value
+    }
+
+    private fun requireValidTunnelIp(tunnelIp: String) {
+        val octets = tunnelIp.split(".")
+        require(octets.size == 4) { "Malformed AUTH_OK tunnel_ip" }
+
+        val values = octets.map { octet ->
+            require(octet.isNotEmpty() && octet.all(Char::isDigit)) {
+                "Malformed AUTH_OK tunnel_ip"
+            }
+            require(octet == "0" || !octet.startsWith("0")) {
+                "Malformed AUTH_OK tunnel_ip"
+            }
+            octet.toInt().also {
+                require(it in 0..255) { "Malformed AUTH_OK tunnel_ip" }
+            }
+        }
+
+        require(values[0] == 10 && values[1] == 1 && values[2] == 0) {
+            "AUTH_OK tunnel_ip outside 10.1.0.0/24"
+        }
+        require(values[3] !in setOf(0, 1, 255)) {
+            "AUTH_OK tunnel_ip is reserved"
+        }
     }
 
     private fun requireValidPublicIdentity() {
@@ -369,13 +444,17 @@ class XorVpnService : VpnService() {
     // -----------------------------------------------------------------------
 
     private fun stopVpn() {
-        if (!running && vpnInterface == null && udpSocket == null) return
-    
-    try { vpnInterface?.close() } catch (_: Exception) {}
-    vpnInterface = null
-    running = false                    
-    try { udpSocket?.close() } catch (_: Exception) {}
-    udpSocket = null
+        if (!running && vpnInterface == null && udpSocket == null) {
+            clearAssignedAuthResult()
+            return
+        }
+
+        try { vpnInterface?.close() } catch (_: Exception) {}
+        vpnInterface = null
+        clearAssignedAuthResult()
+        running = false
+        try { udpSocket?.close() } catch (_: Exception) {}
+        udpSocket = null
 
         // Remove the foreground notification (API-safe for all versions we target)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -388,6 +467,14 @@ class XorVpnService : VpnService() {
         notify("disconnected")
 
         stopSelf()
+    }
+
+    private fun clearAssignedAuthResult() {
+        val assignedTunnelIp = assignedAuthResult?.tunnelIp
+        assignedAuthResult = null
+        if (assignedTunnelIp != null) {
+            Log.d(TAG, "Cleared server-assigned tunnel address")
+        }
     }
 
     // -----------------------------------------------------------------------
