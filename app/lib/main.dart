@@ -18,6 +18,22 @@ const _navy = Color(0xFF0D1B2A);
 const _red = Color(0xFFFF0000);
 const _litText = Color(0xFFFFFFFF);
 
+final class _UpdateNotice {
+  const _UpdateNotice({
+    required this.required,
+    this.reason,
+    this.minVersion,
+    this.latestVersion,
+    this.updateUrl,
+  });
+
+  final bool required;
+  final String? reason;
+  final String? minVersion;
+  final String? latestVersion;
+  final String? updateUrl;
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
@@ -59,6 +75,20 @@ class VpnScreen extends StatefulWidget {
 class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   bool _connected = false;
   bool _holding = false;
+  bool _monitorFacebook = false;
+  bool _monitorChrome = false;
+  _UpdateNotice? _updateNotice;
+
+  bool get _monitorApps => _monitorFacebook || _monitorChrome;
+
+  List<String> get _monitorTargetPackages => <String>[
+    if (_monitorFacebook) ...[
+      'com.facebook.katana',
+      'com.facebook.lite',
+      'com.facebook.orca',
+    ],
+    if (_monitorChrome) 'com.android.chrome',
+  ];
 
   static const _channel = MethodChannel('com.example.app/vpn');
   Future<void> _startVpn() async {
@@ -69,9 +99,11 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       }
       await _channel.invokeMethod(
         'connect',
-        jsonEncode(<String, String>{
+        jsonEncode(<String, Object>{
           'deviceId': identity.deviceId,
           'publicKey': identity.publicKey,
+          'monitorApps': _monitorApps,
+          'targetPackages': _monitorTargetPackages,
         }),
       );
     } catch (_) {
@@ -80,6 +112,33 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _stopVpn() async => _channel.invokeMethod('disconnect');
+
+  Future<void> _openUpdateUrl(String updateUrl) async {
+    try {
+      await _channel.invokeMethod('openUpdateUrl', updateUrl);
+    } catch (_) {
+      await _copyUpdateUrl(updateUrl);
+    }
+  }
+
+  Future<void> _copyUpdateUrl(String updateUrl) async {
+    try {
+      await _channel.invokeMethod('copyUpdateUrl', updateUrl);
+    } catch (_) {
+      await Clipboard.setData(ClipboardData(text: updateUrl));
+    }
+  }
+
+  Future<void> _syncAutomationTargets() async {
+    try {
+      await _channel.invokeMethod(
+        'setAutomationTargets',
+        jsonEncode(<String, Object>{'targetPackages': _monitorTargetPackages}),
+      );
+    } catch (_) {
+      // Native permission UI may interrupt this call; the next toggle/connect resyncs state.
+    }
+  }
 
   late AnimationController _warpLevelController;
   late Ticker _ticker;
@@ -134,12 +193,27 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
         final arguments = Map<String, Object?>.from(call.arguments as Map);
         return _deviceIdentity.signChallenge(
           buildNumber: arguments['buildNumber']! as String,
+          appVersion: arguments['appVersion'] as String?,
+          platform: arguments['platform'] as String?,
           challengeId: arguments['challengeId']! as String,
           challenge: arguments['challenge']! as String,
         );
       }
       if (call.method != 'onStatusChange') return null;
       final String status = call.arguments as String;
+      if (status.startsWith('update_required:')) {
+        setState(() {
+          _updateNotice = _parseUpdateNotice(status, required: true);
+        });
+        _resetToDisconnected();
+        return null;
+      }
+      if (status.startsWith('update_available:')) {
+        setState(() {
+          _updateNotice = _parseUpdateNotice(status, required: false);
+        });
+        return null;
+      }
       if (status == 'denied' || status.startsWith('denied:')) {
         _resetToDisconnected();
         return null;
@@ -196,6 +270,18 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       0,
       duration: const Duration(milliseconds: 1200),
       curve: Curves.easeOut,
+    );
+  }
+
+  _UpdateNotice _parseUpdateNotice(String status, {required bool required}) {
+    final payload = status.substring(status.indexOf(':') + 1);
+    final json = jsonDecode(payload) as Map<String, Object?>;
+    return _UpdateNotice(
+      required: required,
+      reason: json['reason'] as String?,
+      minVersion: json['min_version'] as String?,
+      latestVersion: json['latest_version'] as String?,
+      updateUrl: json['update_url'] as String?,
     );
   }
 
@@ -270,7 +356,51 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
               ),
             ),
 
+            Positioned(
+              top: screen.height * 0.28,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: _AppMonitorToggle(
+                  facebookSelected: _monitorFacebook,
+                  chromeSelected: _monitorChrome,
+                  enabled: !_holding && !_connected,
+                  onFacebookChanged: (selected) {
+                    setState(() {
+                      _monitorFacebook = selected;
+                    });
+                    _syncAutomationTargets();
+                  },
+                  onChromeChanged: (selected) {
+                    setState(() {
+                      _monitorChrome = selected;
+                    });
+                    _syncAutomationTargets();
+                  },
+                ),
+              ),
+            ),
+
             // Light switch — bottom center
+            if (_updateNotice case final notice?)
+              Positioned(
+                top: screen.height * 0.14,
+                left: 20,
+                right: 20,
+                child: _UpdateNoticeBanner(
+                  notice: notice,
+                  onOpen: notice.updateUrl == null
+                      ? null
+                      : () => _openUpdateUrl(notice.updateUrl!),
+                  onCopy: notice.updateUrl == null
+                      ? null
+                      : () => _copyUpdateUrl(notice.updateUrl!),
+                  onDismiss: notice.required
+                      ? null
+                      : () => setState(() => _updateNotice = null),
+                ),
+              ),
+
             Positioned(
               bottom: 80,
               left: 0,
@@ -307,6 +437,349 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       ),
     );
   }
+}
+
+class _UpdateNoticeBanner extends StatelessWidget {
+  final _UpdateNotice notice;
+  final VoidCallback? onOpen;
+  final VoidCallback? onCopy;
+  final VoidCallback? onDismiss;
+
+  const _UpdateNoticeBanner({
+    required this.notice,
+    required this.onOpen,
+    required this.onCopy,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final title = notice.required ? 'Update required' : 'Update available';
+    final detail = switch ((notice.minVersion, notice.latestVersion)) {
+      (final minVersion?, final latestVersion?) =>
+        'Minimum $minVersion. Latest $latestVersion.',
+      (final minVersion?, null) => 'Minimum $minVersion.',
+      (null, final latestVersion?) => 'Latest $latestVersion.',
+      _ =>
+        notice.required
+            ? 'Install the latest version to connect.'
+            : 'A newer version is ready.',
+    };
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF120D12).withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _red.withValues(alpha: 0.64), width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.32),
+            blurRadius: 18,
+            offset: const Offset(0, 9),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            notice.required ? Icons.error_outline : Icons.system_update_alt,
+            color: _red.withValues(alpha: 0.95),
+            size: 24,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.68),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onOpen != null)
+            IconButton(
+              tooltip: 'Open update',
+              onPressed: onOpen,
+              icon: const Icon(Icons.open_in_new),
+              color: Colors.white,
+            ),
+          if (onCopy != null)
+            IconButton(
+              tooltip: 'Copy update link',
+              onPressed: onCopy,
+              icon: const Icon(Icons.copy),
+              color: Colors.white,
+            ),
+          if (onDismiss != null)
+            IconButton(
+              tooltip: 'Dismiss',
+              onPressed: onDismiss,
+              icon: const Icon(Icons.close),
+              color: Colors.white.withValues(alpha: 0.72),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AppMonitorToggle extends StatelessWidget {
+  final bool facebookSelected;
+  final bool chromeSelected;
+  final bool enabled;
+  final ValueChanged<bool> onFacebookChanged;
+  final ValueChanged<bool> onChromeChanged;
+
+  const _AppMonitorToggle({
+    required this.facebookSelected,
+    required this.chromeSelected,
+    required this.enabled,
+    required this.onFacebookChanged,
+    required this.onChromeChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = facebookSelected || chromeSelected;
+
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.45,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 184,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF071522).withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected
+                ? _red.withValues(alpha: 0.55)
+                : Colors.white.withValues(alpha: 0.18),
+            width: 1.1,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.30),
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _MonitorAppOption(
+              selected: facebookSelected,
+              enabled: enabled,
+              semanticLabel: 'Facebook app monitor',
+              label: 'Facebook',
+              onChanged: onFacebookChanged,
+              logo: CustomPaint(
+                size: const Size(38, 38),
+                painter: _FacebookLogoPainter(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            _MonitorAppOption(
+              selected: chromeSelected,
+              enabled: enabled,
+              semanticLabel: 'Chrome app monitor',
+              label: 'Chrome',
+              onChanged: onChromeChanged,
+              logo: CustomPaint(
+                size: const Size(38, 38),
+                painter: _ChromeLogoPainter(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MonitorAppOption extends StatelessWidget {
+  final bool selected;
+  final bool enabled;
+  final String semanticLabel;
+  final String label;
+  final ValueChanged<bool> onChanged;
+  final Widget logo;
+
+  const _MonitorAppOption({
+    required this.selected,
+    required this.enabled,
+    required this.semanticLabel,
+    required this.label,
+    required this.onChanged,
+    required this.logo,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = selected
+        ? _red.withValues(alpha: 0.95)
+        : Colors.white.withValues(alpha: 0.62);
+    final fillColor = selected
+        ? const Color(0xFF2C0B12).withValues(alpha: 0.95)
+        : const Color(0xFF102B44).withValues(alpha: 0.94);
+
+    return Semantics(
+      button: true,
+      checked: selected,
+      label: semanticLabel,
+      child: GestureDetector(
+        onTap: enabled ? () => onChanged(!selected) : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 168,
+          height: 62,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: fillColor,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: borderColor, width: 1.6),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: _red.withValues(alpha: 0.26),
+                      blurRadius: 18,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              logo,
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.90),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: selected ? _red : Colors.transparent,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: selected
+                        ? const Color(0xFFFF6A6A)
+                        : Colors.white.withValues(alpha: 0.46),
+                    width: 1.4,
+                  ),
+                ),
+                child: selected
+                    ? const Icon(Icons.check, size: 17, color: Colors.white)
+                    : null,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FacebookLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.shortestSide / 2;
+    canvas.drawCircle(center, radius, Paint()..color = const Color(0xFF1877F2));
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: 'f',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size.height * 0.86,
+          fontWeight: FontWeight.w800,
+          height: 1,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        center.dx - textPainter.width * 0.40,
+        center.dy - textPainter.height * 0.42,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FacebookLogoPainter oldDelegate) => false;
+}
+
+class _ChromeLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.shortestSide / 2;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    canvas.drawArc(
+      rect,
+      -pi / 2,
+      2 * pi / 3,
+      true,
+      Paint()..color = const Color(0xFFDB4437),
+    );
+    canvas.drawArc(
+      rect,
+      pi / 6,
+      2 * pi / 3,
+      true,
+      Paint()..color = const Color(0xFFF4B400),
+    );
+    canvas.drawArc(
+      rect,
+      5 * pi / 6,
+      2 * pi / 3,
+      true,
+      Paint()..color = const Color(0xFF0F9D58),
+    );
+    canvas.drawCircle(center, radius * 0.45, Paint()..color = Colors.white);
+    canvas.drawCircle(
+      center,
+      radius * 0.34,
+      Paint()..color = const Color(0xFF4285F4),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ChromeLogoPainter oldDelegate) => false;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -77,7 +77,12 @@ class AppMonitorService : Service() {
     }
 
     private fun handleForegroundPackage(packageName: String) {
-        val isTarget = packageName in TARGET_PACKAGES
+        val targetPackages = VpnActions.monitorTargetPackages(this)
+        if (targetPackages.isEmpty()) {
+            stopSelf()
+            return
+        }
+        val isTarget = packageName in targetPackages
 
         if (isTarget && !targetAppActive) {
             targetAppActive = true
@@ -145,10 +150,5 @@ class AppMonitorService : Service() {
         private const val INITIAL_LOOKBACK_MS = 5_000L
         private const val DISCONNECT_DELAY_MS = 1_200L
 
-        private val TARGET_PACKAGES = setOf(
-            "com.facebook.katana",
-            "com.facebook.lite",
-            "com.facebook.orca",
-        )
     }
 }

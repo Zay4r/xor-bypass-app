@@ -42,10 +42,21 @@ private data class AuthResult(
     val tunnelIpBytes: ByteArray,
     val prefixLength: Int,
     val mtu: Int,
+    val updateNotice: UpdateNotice?,
     val sessionKeyVersion: Byte,
     val clientToServerDataKey: ByteArray,
     val serverToClientDataKey: ByteArray,
 )
+
+private data class UpdateNotice(
+    val latestVersion: String?,
+    val updateUrl: String?,
+) {
+    fun toJson(): String = JSONObject().apply {
+        latestVersion?.let { put("latest_version", it) }
+        updateUrl?.let { put("update_url", it) }
+    }.toString()
+}
 
 private data class DataSessionKeys(
     val keyVersion: Byte,
@@ -53,7 +64,26 @@ private data class DataSessionKeys(
     val serverToClient: ByteArray,
 )
 
-private class AuthDeniedException(val reason: String) : Exception(reason)
+private data class AuthDenial(
+    val reason: String,
+    val minVersion: String?,
+    val latestVersion: String?,
+    val updateUrl: String?,
+    val updateAvailable: Boolean,
+) {
+    val requiresUpdate: Boolean
+        get() = reason == "app_version_unsupported" || reason == "app_version_required"
+
+    fun toJson(): String = JSONObject().apply {
+        put("reason", reason)
+        minVersion?.let { put("min_version", it) }
+        latestVersion?.let { put("latest_version", it) }
+        updateUrl?.let { put("update_url", it) }
+        put("update_available", updateAvailable)
+    }.toString()
+}
+
+private class AuthDeniedException(val denial: AuthDenial) : Exception(denial.reason)
 
 class XorVpnService : VpnService() {
 
@@ -61,8 +91,11 @@ class XorVpnService : VpnService() {
     private var udpSocket: DatagramSocket? = null
     private var running = false
     private var buildNumber = ""
+    private var appVersion = ""
+    private var platform = ""
     private var deviceId = ""
     private var publicKey = ""
+    private var targetPackages = DEFAULT_TARGET_PACKAGES
     private val startLock = Any()
     private var handshakeInProgress = false
     private var assignedAuthResult: AuthResult? = null
@@ -75,10 +108,11 @@ class XorVpnService : VpnService() {
         private const val SIGNING_TIMEOUT_MS = 5_000L
         private const val AUTH_RETRY_DELAY_MS = 1_000L
 
-        private val TARGET_PACKAGES = listOf(
+        private val DEFAULT_TARGET_PACKAGES = setOf(
             "com.facebook.katana",
             "com.facebook.lite",
             "com.facebook.orca",
+            "com.android.chrome",
         )
     }
 
@@ -98,8 +132,13 @@ class XorVpnService : VpnService() {
         buildNumber = BuildIdentifier.sanitize(
             intent?.getStringExtra("buildNumber") ?: BuildIdentifier.current(),
         )
+        appVersion = BuildIdentifier.appVersion()
+        platform = "android"
         deviceId = intent?.getStringExtra("deviceId").orEmpty()
         publicKey = intent?.getStringExtra("publicKey").orEmpty()
+        targetPackages = VpnActions.sanitizeTargetPackages(
+            intent?.getStringArrayListExtra("targetPackages").orEmpty(),
+        ).ifEmpty { DEFAULT_TARGET_PACKAGES }
         startForegroundNotification()
         Thread { startVpn() }.start()
         return START_NOT_STICKY
@@ -127,12 +166,16 @@ class XorVpnService : VpnService() {
             val authResult = try {
                 performAuth(socket, serverAddr)
             } catch (e: AuthDeniedException) {
-                if (e.reason == "not_provisioned") {
+                if (e.denial.reason == "not_provisioned") {
                     VpnActions.markNotProvisioned(this)
                     VpnActions.stopMonitor(this)
                     Log.w(TAG, "Device has not been provisioned on the server; device_id=$deviceId")
                 }
-                notify("denied:${e.reason}")
+                if (e.denial.requiresUpdate) {
+                    notify("update_required:${e.denial.toJson()}")
+                } else {
+                    notify("denied:${e.denial.reason}")
+                }
                 stopVpn()
                 return
             }
@@ -149,7 +192,7 @@ class XorVpnService : VpnService() {
 
             val allowedAppCount = addAllowedTargetApps(builder)
             if (allowedAppCount == 0) {
-                notify("error: Facebook is not installed")
+                notify("error: Target app is not installed")
                 stopVpn()
                 return
             }
@@ -162,6 +205,9 @@ class XorVpnService : VpnService() {
 
             running = true
             notify("connected")
+            authResult.updateNotice?.let {
+                notify("update_available:${it.toJson()}")
+            }
 
             // ── Step 3: phone → encrypt → server ──────────────────────────
             Thread {
@@ -224,10 +270,15 @@ class XorVpnService : VpnService() {
 
                             PKT_AUTH_DENY -> {
                                 // Server kicked us mid-session (blocked or expired).
-                                val reason = denialReason(payload)
+                                val denial = parseAuthDenial(payload)
+                                val reason = denial.reason
                                 Log.w(TAG, "Mid-session kick received — reason: $reason")
                                 // notify Flutter first, then tear down everything via stopVpn()
-                                notify("denied:$reason")
+                                if (denial.requiresUpdate) {
+                                    notify("update_required:${denial.toJson()}")
+                                } else {
+                                    notify("denied:${denial.reason}")
+                                }
                                 stopVpn()
                             }
 
@@ -249,6 +300,8 @@ class XorVpnService : VpnService() {
                 handshakeInProgress = false
             }
             buildNumber = ""
+            appVersion = ""
+            platform = ""
             deviceId = ""
             publicKey = ""
         }
@@ -263,6 +316,8 @@ class XorVpnService : VpnService() {
         val publicKeyBytes = Base64.decode(publicKey, Base64.DEFAULT)
         val hello = JSONObject()
             .put("build_number", buildNumber)
+            .put("platform", platform)
+            .put("app_version", appVersion)
             .put("device_id", deviceId)
             .put("public_key", publicKey)
             .toString()
@@ -276,7 +331,7 @@ class XorVpnService : VpnService() {
                 sendEncrypted(socket, serverAddr, PKT_AUTH_HELLO, hello)
                 val challengePacket = receiveAuthenticatedPacket(socket)
                 if (challengePacket.type == PKT_AUTH_DENY) {
-                    throw AuthDeniedException(denialReason(challengePacket.payload))
+                    throw AuthDeniedException(parseAuthDenial(challengePacket.payload))
                 }
                 if (challengePacket.type != PKT_AUTH_CHALLENGE) {
                     throw IllegalStateException("Expected AUTH_CHALLENGE")
@@ -305,6 +360,8 @@ class XorVpnService : VpnService() {
                     challengeId = challengeId,
                     challenge = challenge,
                     publicKeyBytes = publicKeyBytes,
+                    appVersion = appVersion,
+                    platform = platform,
                     signatureBytes = signatureBytes,
                 )
                 val proof = JSONObject()
@@ -324,7 +381,7 @@ class XorVpnService : VpnService() {
                 val result = receiveAuthenticatedPacket(socket)
                 when (result.type) {
                     PKT_AUTH_OK -> return parseAuthOk(result.payload, sessionKeys)
-                    PKT_AUTH_DENY -> throw AuthDeniedException(denialReason(result.payload))
+                    PKT_AUTH_DENY -> throw AuthDeniedException(parseAuthDenial(result.payload))
                     else -> throw IllegalStateException("Expected AUTH_OK or AUTH_DENY")
                 }
             } catch (e: AuthDeniedException) {
@@ -354,12 +411,21 @@ class XorVpnService : VpnService() {
 
         val mtu = json.requireInt("mtu")
         require(mtu in 576..1500) { "Malformed AUTH_OK MTU" }
+        val updateNotice = if (json.optBoolean("update_available", false)) {
+            UpdateNotice(
+                latestVersion = json.optString("latest_version").takeIf { it.isNotBlank() },
+                updateUrl = json.optString("update_url").takeIf { it.isNotBlank() },
+            )
+        } else {
+            null
+        }
 
         return AuthResult(
             tunnelIp = tunnelIp,
             tunnelIpBytes = tunnelIpBytes,
             prefixLength = prefixLength,
             mtu = mtu,
+            updateNotice = updateNotice,
             sessionKeyVersion = sessionKeys.keyVersion,
             clientToServerDataKey = sessionKeys.clientToServer,
             serverToClientDataKey = sessionKeys.serverToClient,
@@ -452,6 +518,8 @@ class XorVpnService : VpnService() {
         challengeId: ByteArray,
         challenge: ByteArray,
         publicKeyBytes: ByteArray,
+        appVersion: String,
+        platform: String,
         signatureBytes: ByteArray,
     ): DataSessionKeys {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -460,6 +528,10 @@ class XorVpnService : VpnService() {
         digest.update(challenge)
         digest.update(deviceId.toByteArray(Charsets.UTF_8))
         digest.update(publicKeyBytes)
+        if (appVersion.isNotEmpty() || platform.isNotEmpty()) {
+            digest.update(appVersion.toByteArray(Charsets.UTF_8))
+            digest.update(platform.toByteArray(Charsets.UTF_8))
+        }
         digest.update(signatureBytes)
         val transcriptHash = digest.digest()
         return DataSessionKeys(
@@ -498,6 +570,8 @@ class XorVpnService : VpnService() {
                 "signAuthChallenge",
                 mapOf(
                     "buildNumber" to buildNumber,
+                    "appVersion" to appVersion,
+                    "platform" to platform,
                     "challengeId" to Base64.encodeToString(challengeId, Base64.NO_WRAP),
                     "challenge" to Base64.encodeToString(challenge, Base64.NO_WRAP),
                 ),
@@ -526,15 +600,30 @@ class XorVpnService : VpnService() {
         return signature.get() ?: error("Signing returned no signature")
     }
 
-    private fun denialReason(payload: ByteArray): String {
+    private fun parseAuthDenial(payload: ByteArray): AuthDenial {
         val text = payload.toString(Charsets.UTF_8).trim()
-        val parsed = runCatching { JSONObject(text).optString("reason") }.getOrNull()
-        return (parsed?.takeIf { it.isNotBlank() } ?: text).ifBlank { "denied" }
+        val json = runCatching { JSONObject(text) }.getOrNull()
+        if (json != null) {
+            return AuthDenial(
+                reason = json.optString("reason").takeIf { it.isNotBlank() } ?: "denied",
+                minVersion = json.optString("min_version").takeIf { it.isNotBlank() },
+                latestVersion = json.optString("latest_version").takeIf { it.isNotBlank() },
+                updateUrl = json.optString("update_url").takeIf { it.isNotBlank() },
+                updateAvailable = json.optBoolean("update_available", false),
+            )
+        }
+        return AuthDenial(
+            reason = text.ifBlank { "denied" },
+            minVersion = null,
+            latestVersion = null,
+            updateUrl = null,
+            updateAvailable = false,
+        )
     }
 
     private fun addAllowedTargetApps(builder: Builder): Int {
         var count = 0
-        for (packageName in TARGET_PACKAGES) {
+        for (packageName in targetPackages) {
             try {
                 builder.addAllowedApplication(packageName)
                 count++
@@ -618,7 +707,7 @@ class XorVpnService : VpnService() {
             @Suppress("DEPRECATION") Notification.Builder(this)
         }
             .setContentTitle("XorVPN Active")
-            .setContentText("Facebook traffic is protected")
+            .setContentText("Selected app traffic is protected")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .addAction(android.R.drawable.ic_delete, "Disconnect", stopIntent)
             .build()

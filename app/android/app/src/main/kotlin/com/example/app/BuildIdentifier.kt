@@ -5,6 +5,7 @@ import android.os.Build
 object BuildIdentifier {
     private const val MAX_BYTES = 64
     private val allowedChars = Regex("[A-Za-z0-9 ._:/+\\-]")
+    private val numericVersion = Regex("""\d+(?:\.\d+)*""")
 
     fun current(): String {
         val raw = "${Build.BRAND}/${Build.MODEL}:${Build.VERSION.RELEASE}/" +
@@ -19,6 +20,9 @@ object BuildIdentifier {
             .takeUtf8Bytes(MAX_BYTES)
         return sanitized.ifEmpty { "unknown" }
     }
+
+    fun appVersion(): String =
+        numericVersion.find(BuildConfig.VERSION_NAME)?.value ?: "0.0.0"
 
     private fun String.takeUtf8Bytes(maxBytes: Int): String {
         val builder = StringBuilder()

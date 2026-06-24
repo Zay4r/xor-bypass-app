@@ -44,6 +44,8 @@ final class DeviceIdentity {
 
   Future<String> signChallenge({
     required String buildNumber,
+    String? appVersion,
+    String? platform,
     required String challengeId,
     required String challenge,
   }) async {
@@ -61,12 +63,27 @@ final class DeviceIdentity {
 
     final buildHash = await Sha256().hash(utf8.encode(buildNumber));
     final publicKeyHash = await Sha256().hash(publicKey.bytes);
+    final includeVersionPolicy =
+        (appVersion?.isNotEmpty ?? false) || (platform?.isNotEmpty ?? false);
+    if (includeVersionPolicy &&
+        ((appVersion == null || appVersion.isEmpty) ||
+            (platform == null || platform.isEmpty))) {
+      throw const FormatException('Incomplete authentication version policy');
+    }
+    final appVersionHash = includeVersionPolicy
+        ? await Sha256().hash(utf8.encode(appVersion!))
+        : null;
+    final platformHash = includeVersionPolicy
+        ? await Sha256().hash(utf8.encode(platform!))
+        : null;
     final message = <int>[
       ...utf8.encode(_signingContext),
       ...challengeIdBytes,
       ...challengeBytes,
       ...buildHash.bytes,
       ...publicKeyHash.bytes,
+      if (appVersionHash != null) ...appVersionHash.bytes,
+      if (platformHash != null) ...platformHash.bytes,
     ];
     final signature = await _algorithm.sign(message, keyPair: keyPair);
     if (signature.bytes.length != 64) {

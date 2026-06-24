@@ -1,37 +1,59 @@
 package com.example.app
 
 import android.app.AppOpsManager
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Process
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
 
     private val vpnRequestCode = 1001
 
+    private enum class UsageAccessRequest {
+        CONNECT,
+        AUTOMATION,
+    }
+
     private lateinit var methodChannel: MethodChannel
-    private var waitingForUsageAccess = false
+    private var usageAccessRequest: UsageAccessRequest? = null
     private var pendingDeviceId: String? = null
     private var pendingPublicKey: String? = null
+    private var pendingMonitorApps = false
+    private var pendingTargetPackages: Set<String> = emptySet()
 
     override fun provideFlutterEngine(context: Context): FlutterEngine =
         (application as XorVpnApplication).flutterEngine
 
     override fun onResume() {
         super.onResume()
-        if (!waitingForUsageAccess) return
+        val request = usageAccessRequest ?: return
 
-        waitingForUsageAccess = false
-        if (hasUsageAccess()) {
-            requestVpnPermission()
-        } else if (::methodChannel.isInitialized) {
-            methodChannel.invokeMethod("onStatusChange", "error: Usage Access is required")
+        usageAccessRequest = null
+        when (request) {
+            UsageAccessRequest.CONNECT -> {
+                if (hasUsageAccess()) {
+                    requestVpnPermission()
+                } else if (::methodChannel.isInitialized) {
+                    clearPendingConnect()
+                    methodChannel.invokeMethod("onStatusChange", "error: Usage Access is required")
+                }
+            }
+            UsageAccessRequest.AUTOMATION -> {
+                if (hasUsageAccess() && VpnActions.monitorTargetPackages(this).isNotEmpty()) {
+                    VpnActions.startMonitor(this)
+                }
+            }
         }
     }
 
@@ -47,13 +69,15 @@ class MainActivity : FlutterActivity() {
         methodChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "connect" -> {
+                    val monitorApps = parseMonitorApps(call.arguments)
+                    val targetPackages = parseTargetPackages(call.arguments)
                     parseIdentity(call.arguments)?.let {
-                        continueConnect(it.first, it.second)
+                        continueConnect(it.first, it.second, monitorApps, targetPackages)
                         result.success(null)
                         return@setMethodCallHandler
                     }
                     VpnActions.cachedIdentity(this)?.let {
-                        continueConnect(it.first, it.second)
+                        continueConnect(it.first, it.second, monitorApps, targetPackages)
                         result.success(null)
                         return@setMethodCallHandler
                     }
@@ -66,7 +90,12 @@ class MainActivity : FlutterActivity() {
                                 val identity = parseIdentity(identityPayload)
                                 if (identity == null) {
                                     VpnActions.cachedIdentity(this@MainActivity)?.let {
-                                        continueConnect(it.first, it.second)
+                                        continueConnect(
+                                            it.first,
+                                            it.second,
+                                            monitorApps,
+                                            targetPackages,
+                                        )
                                         result.success(null)
                                         return
                                     }
@@ -77,7 +106,12 @@ class MainActivity : FlutterActivity() {
                                     )
                                     return
                                 }
-                                continueConnect(identity.first, identity.second)
+                                continueConnect(
+                                    identity.first,
+                                    identity.second,
+                                    monitorApps,
+                                    targetPackages,
+                                )
                                 result.success(null)
                             }
 
@@ -96,9 +130,33 @@ class MainActivity : FlutterActivity() {
                     )
                 }
 
+                "setAutomationTargets" -> {
+                    configureAutomationTargets(parseTargetPackages(call.arguments))
+                    result.success(null)
+                }
+
                 "disconnect" -> {
                     VpnActions.stopVpn(this)
                     result.success(null)
+                }
+
+                "openUpdateUrl" -> {
+                    val updateUrl = call.arguments as? String
+                    if (updateUrl.isNullOrBlank()) {
+                        result.error("invalid_url", "Update URL is missing", null)
+                    } else {
+                        openUpdateUrl(updateUrl, result)
+                    }
+                }
+
+                "copyUpdateUrl" -> {
+                    val updateUrl = call.arguments as? String
+                    if (updateUrl.isNullOrBlank()) {
+                        result.error("invalid_url", "Update URL is missing", null)
+                    } else {
+                        copyUpdateUrl(updateUrl)
+                        result.success(null)
+                    }
                 }
 
                 else -> result.notImplemented()
@@ -118,17 +176,24 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requestConnect() {
-        if (!hasUsageAccess()) {
-            waitingForUsageAccess = true
+        if (pendingMonitorApps && !hasUsageAccess()) {
+            usageAccessRequest = UsageAccessRequest.CONNECT
             startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
             return
         }
         requestVpnPermission()
     }
 
-    private fun continueConnect(deviceId: String, publicKey: String) {
+    private fun continueConnect(
+        deviceId: String,
+        publicKey: String,
+        monitorApps: Boolean,
+        targetPackages: Set<String>,
+    ) {
         pendingDeviceId = deviceId
         pendingPublicKey = publicKey
+        pendingMonitorApps = monitorApps
+        pendingTargetPackages = targetPackages
         requestConnect()
     }
 
@@ -161,6 +226,53 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun parseMonitorApps(arguments: Any?): Boolean {
+        return when (arguments) {
+            is String -> runCatching {
+                JSONObject(arguments).optBoolean("monitorApps", false)
+            }.getOrDefault(false)
+            is Map<*, *> -> arguments["monitorApps"] as? Boolean ?: false
+            else -> false
+        }
+    }
+
+    private fun parseTargetPackages(arguments: Any?): Set<String> {
+        val rawPackages = when (arguments) {
+            is String -> runCatching {
+                val json = JSONObject(arguments)
+                json.optJSONArray("targetPackages") ?: JSONArray()
+            }.getOrElse { JSONArray() }.let { array ->
+                buildList {
+                    for (i in 0 until array.length()) {
+                        add(array.optString(i))
+                    }
+                }
+            }
+            is Map<*, *> -> (arguments["targetPackages"] as? List<*>)
+                ?.mapNotNull { it as? String }
+                .orEmpty()
+            else -> emptyList()
+        }
+        return VpnActions.sanitizeTargetPackages(rawPackages)
+    }
+
+    private fun configureAutomationTargets(targetPackages: Set<String>) {
+        VpnActions.setMonitorTargetPackages(this, targetPackages)
+        if (targetPackages.isEmpty()) {
+            if (usageAccessRequest == UsageAccessRequest.AUTOMATION) {
+                usageAccessRequest = null
+            }
+            VpnActions.stopMonitor(this)
+            return
+        }
+        if (!hasUsageAccess()) {
+            usageAccessRequest = UsageAccessRequest.AUTOMATION
+            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+            return
+        }
+        VpnActions.startMonitor(this)
+    }
+
     private fun requestVpnPermission() {
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent != null) {
@@ -173,15 +285,43 @@ class MainActivity : FlutterActivity() {
     private fun launchVpnService() {
         val deviceId = pendingDeviceId
         val publicKey = pendingPublicKey
-        pendingDeviceId = null
-        pendingPublicKey = null
+        val monitorApps = pendingMonitorApps
+        val targetPackages = pendingTargetPackages
+        clearPendingConnect()
         if (deviceId == null || publicKey == null) {
             methodChannel.invokeMethod("onStatusChange", "error: Device identity unavailable")
             return
         }
-        VpnActions.startMonitor(this)
-        VpnActions.startVpn(this, deviceId, publicKey)
+        if (monitorApps) {
+            VpnActions.setMonitorTargetPackages(this, targetPackages)
+            VpnActions.startMonitor(this)
+        } else {
+            VpnActions.stopMonitor(this)
+        }
+        VpnActions.startVpn(this, deviceId, publicKey, targetPackages)
         methodChannel.invokeMethod("onStatusChange", "connecting")
+    }
+
+    private fun clearPendingConnect() {
+        pendingDeviceId = null
+        pendingPublicKey = null
+        pendingMonitorApps = false
+        pendingTargetPackages = emptySet()
+    }
+
+    private fun openUpdateUrl(updateUrl: String, result: MethodChannel.Result) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
+            result.success(null)
+        } catch (_: ActivityNotFoundException) {
+            copyUpdateUrl(updateUrl)
+            result.error("open_failed", "No app can open the update URL", null)
+        }
+    }
+
+    private fun copyUpdateUrl(updateUrl: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("XorVPN update URL", updateUrl))
     }
 
     private fun hasUsageAccess(): Boolean {

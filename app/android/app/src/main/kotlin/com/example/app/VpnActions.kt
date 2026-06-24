@@ -11,8 +11,22 @@ object VpnActions {
     private const val DEVICE_ID_KEY = "device_id"
     private const val PUBLIC_KEY_KEY = "public_key"
     private const val NOT_PROVISIONED_KEY = "not_provisioned"
+    private const val MONITOR_TARGET_PACKAGES_KEY = "monitor_target_packages"
 
-    fun startVpn(context: Context, deviceId: String, publicKey: String) {
+    private val ALLOWED_TARGET_PACKAGES = setOf(
+        "com.facebook.katana",
+        "com.facebook.lite",
+        "com.facebook.orca",
+        "com.android.chrome",
+    )
+
+    fun startVpn(
+        context: Context,
+        deviceId: String,
+        publicKey: String,
+        targetPackages: Set<String> = emptySet(),
+    ) {
+        val sanitizedTargets = sanitizeTargetPackages(targetPackages)
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(DEVICE_ID_KEY, deviceId)
@@ -23,6 +37,7 @@ object VpnActions {
             putExtra("buildNumber", BuildIdentifier.current())
             putExtra("deviceId", deviceId)
             putExtra("publicKey", publicKey)
+            putStringArrayListExtra("targetPackages", ArrayList(sanitizedTargets))
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -39,7 +54,12 @@ object VpnActions {
             return
         }
         val (deviceId, publicKey) = cachedIdentity(context) ?: return
-        startVpn(context, deviceId, publicKey)
+        val targetPackages = monitorTargetPackages(context)
+        if (targetPackages.isEmpty()) {
+            Log.w(TAG, "Skipping automatic VPN start because no monitor targets are selected")
+            return
+        }
+        startVpn(context, deviceId, publicKey, targetPackages)
     }
 
     fun markNotProvisioned(context: Context) {
@@ -83,4 +103,24 @@ object VpnActions {
     fun stopMonitor(context: Context) {
         context.stopService(Intent(context, AppMonitorService::class.java))
     }
+
+    fun setMonitorTargetPackages(context: Context, targetPackages: Set<String>) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(MONITOR_TARGET_PACKAGES_KEY, sanitizeTargetPackages(targetPackages))
+            .apply()
+    }
+
+    fun monitorTargetPackages(context: Context): Set<String> {
+        val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val targetPackages = preferences.getStringSet(MONITOR_TARGET_PACKAGES_KEY, emptySet())
+            ?: emptySet()
+        return sanitizeTargetPackages(targetPackages)
+    }
+
+    fun sanitizeTargetPackages(targetPackages: Iterable<String>): Set<String> =
+        targetPackages
+            .map { it.trim() }
+            .filter { it in ALLOWED_TARGET_PACKAGES }
+            .toSet()
 }
