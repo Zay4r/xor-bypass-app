@@ -26,6 +26,13 @@ object VpnConfig {
     private val rotationSecs: Long = BuildConfig.ROTATION_INTERVAL_SEC
     private val secureRandom = SecureRandom()
 
+    data class AuthPacket(
+        val type: Byte,
+        val payload: ByteArray,
+        val keyVersion: Byte,
+        val authKey: ByteArray,
+    )
+
     fun currentWindowIndex(): Long =
         System.currentTimeMillis() / 1000L / rotationSecs
 
@@ -39,12 +46,26 @@ object VpnConfig {
 
     fun encryptPacket(type: Byte, payload: ByteArray): ByteArray {
         val windowIndex = currentWindowIndex()
-        val header = byteArrayOf(type, (windowIndex and 0xFF).toByte())
+        return encryptPacketWithKey(
+            type = type,
+            keyVersion = (windowIndex and 0xFF).toByte(),
+            key = deriveCryptoKeyForWindow(windowIndex),
+            payload = payload,
+        )
+    }
+
+    fun encryptPacketWithKey(
+        type: Byte,
+        keyVersion: Byte,
+        key: ByteArray,
+        payload: ByteArray,
+    ): ByteArray {
+        val header = byteArrayOf(type, keyVersion)
         val nonce = ByteArray(NONCE_SIZE).also(secureRandom::nextBytes)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(
             Cipher.ENCRYPT_MODE,
-            SecretKeySpec(deriveCryptoKeyForWindow(windowIndex), "AES"),
+            SecretKeySpec(key, "AES"),
             GCMParameterSpec(GCM_TAG_BITS, nonce),
         )
         cipher.updateAAD(header)
@@ -53,6 +74,40 @@ object VpnConfig {
     }
 
     fun decryptPacket(data: ByteArray): Pair<Byte, ByteArray>? {
+        val packet = decryptAuthPacket(data) ?: return null
+        return Pair(packet.type, packet.payload)
+    }
+
+    fun decryptPacketWithKey(data: ByteArray, expectedKeyVersion: Byte, key: ByteArray): Pair<Byte, ByteArray>? {
+        if (data.size < PACKET_OVERHEAD) {
+            Log.w(TAG, "Dropping undersized encrypted packet (${data.size} bytes)")
+            return null
+        }
+
+        val header = data.copyOfRange(0, HEADER_SIZE)
+        val keyVersion = header[1]
+        if (keyVersion != expectedKeyVersion) {
+            Log.w(TAG, "Dropping DATA packet with unexpected session key version")
+            return null
+        }
+        val nonce = data.copyOfRange(HEADER_SIZE, HEADER_SIZE + NONCE_SIZE)
+        val ciphertextAndTag = data.copyOfRange(HEADER_SIZE + NONCE_SIZE, data.size)
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(key, "AES"),
+                GCMParameterSpec(GCM_TAG_BITS, nonce),
+            )
+            cipher.updateAAD(header)
+            Pair(header[0], cipher.doFinal(ciphertextAndTag))
+        } catch (_: GeneralSecurityException) {
+            Log.w(TAG, "Dropping packet that failed AES-GCM authentication")
+            null
+        }
+    }
+
+    fun decryptAuthPacket(data: ByteArray): AuthPacket? {
         if (data.size < PACKET_OVERHEAD) {
             Log.w(TAG, "Dropping undersized encrypted packet (${data.size} bytes)")
             return null
@@ -75,22 +130,26 @@ object VpnConfig {
             }
         }
 
+        val authKey = deriveCryptoKeyForWindow(matchedWindow)
         val nonce = data.copyOfRange(HEADER_SIZE, HEADER_SIZE + NONCE_SIZE)
         val ciphertextAndTag = data.copyOfRange(HEADER_SIZE + NONCE_SIZE, data.size)
         return try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(
                 Cipher.DECRYPT_MODE,
-                SecretKeySpec(deriveCryptoKeyForWindow(matchedWindow), "AES"),
+                SecretKeySpec(authKey, "AES"),
                 GCMParameterSpec(GCM_TAG_BITS, nonce),
             )
             cipher.updateAAD(header)
-            Pair(header[0], cipher.doFinal(ciphertextAndTag))
+            AuthPacket(header[0], cipher.doFinal(ciphertextAndTag), keyVersion, authKey)
         } catch (_: GeneralSecurityException) {
             Log.w(TAG, "Dropping packet that failed AES-GCM authentication")
             null
         }
     }
+
+    fun deriveSessionKey(authKey: ByteArray, transcriptHash: ByteArray, info: String): ByteArray =
+        hkdfDeriveKey(authKey, transcriptHash, info.toByteArray(Charsets.UTF_8), 32)
 
     // HKDF-SHA256 extract and expand (RFC 5869).
     private fun hkdfDeriveKey(

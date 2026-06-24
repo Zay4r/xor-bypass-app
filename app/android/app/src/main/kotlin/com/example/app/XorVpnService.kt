@@ -39,8 +39,18 @@ private const val PKT_AUTH_DENY = 0xA1.toByte()
 
 private data class AuthResult(
     val tunnelIp: String,
+    val tunnelIpBytes: ByteArray,
     val prefixLength: Int,
     val mtu: Int,
+    val sessionKeyVersion: Byte,
+    val clientToServerDataKey: ByteArray,
+    val serverToClientDataKey: ByteArray,
+)
+
+private data class DataSessionKeys(
+    val keyVersion: Byte,
+    val clientToServer: ByteArray,
+    val serverToClient: ByteArray,
 )
 
 private class AuthDeniedException(val reason: String) : Exception(reason)
@@ -117,6 +127,11 @@ class XorVpnService : VpnService() {
             val authResult = try {
                 performAuth(socket, serverAddr)
             } catch (e: AuthDeniedException) {
+                if (e.reason == "not_provisioned") {
+                    VpnActions.markNotProvisioned(this)
+                    VpnActions.stopMonitor(this)
+                    Log.w(TAG, "Device has not been provisioned on the server; device_id=$deviceId")
+                }
                 notify("denied:${e.reason}")
                 stopVpn()
                 return
@@ -158,7 +173,17 @@ class XorVpnService : VpnService() {
                         val n = input.read(buffer)
                         if (n <= 0) continue
 
-                        val wrapped = VpnConfig.encryptPacket(PKT_DATA, buffer.copyOf(n))
+                        val packet = buffer.copyOf(n)
+                        if (!hasAssignedIpv4Source(packet, authResult.tunnelIpBytes)) {
+                            Log.w(TAG, "Dropping outbound packet with non-assigned source IP")
+                            continue
+                        }
+                        val wrapped = VpnConfig.encryptPacketWithKey(
+                            PKT_DATA,
+                            authResult.sessionKeyVersion,
+                            authResult.clientToServerDataKey,
+                            packet,
+                        )
 
                         sock.send(
                             DatagramPacket(wrapped, wrapped.size, serverAddr, VpnConfig.SERVER_PORT),
@@ -181,7 +206,15 @@ class XorVpnService : VpnService() {
                         udpPacket.length = buffer.size
                         sock.receive(udpPacket)
                         val raw = buffer.copyOf(udpPacket.length)
-                        val (type, payload) = VpnConfig.decryptPacket(raw) ?: continue
+                        val decrypted = when (raw.firstOrNull()) {
+                            PKT_DATA -> VpnConfig.decryptPacketWithKey(
+                                raw,
+                                authResult.sessionKeyVersion,
+                                authResult.serverToClientDataKey,
+                            )
+                            else -> VpnConfig.decryptPacket(raw)
+                        } ?: continue
+                        val (type, payload) = decrypted
 
                         when (type) {
                             PKT_DATA -> {
@@ -227,6 +260,7 @@ class XorVpnService : VpnService() {
 
     private fun performAuth(socket: DatagramSocket, serverAddr: InetAddress): AuthResult {
         requireValidPublicIdentity()
+        val publicKeyBytes = Base64.decode(publicKey, Base64.DEFAULT)
         val hello = JSONObject()
             .put("build_number", buildNumber)
             .put("device_id", deviceId)
@@ -241,14 +275,14 @@ class XorVpnService : VpnService() {
                 Log.d(TAG, "Authentication attempt ${attempt + 1}/$AUTH_MAX_ATTEMPTS")
                 sendEncrypted(socket, serverAddr, PKT_AUTH_HELLO, hello)
                 val challengePacket = receiveAuthenticatedPacket(socket)
-                if (challengePacket.first == PKT_AUTH_DENY) {
-                    throw AuthDeniedException(denialReason(challengePacket.second))
+                if (challengePacket.type == PKT_AUTH_DENY) {
+                    throw AuthDeniedException(denialReason(challengePacket.payload))
                 }
-                if (challengePacket.first != PKT_AUTH_CHALLENGE) {
+                if (challengePacket.type != PKT_AUTH_CHALLENGE) {
                     throw IllegalStateException("Expected AUTH_CHALLENGE")
                 }
 
-                val challengeJson = JSONObject(challengePacket.second.toString(Charsets.UTF_8))
+                val challengeJson = JSONObject(challengePacket.payload.toString(Charsets.UTF_8))
                 challengeId = Base64.decode(challengeJson.getString("challenge_id"), Base64.DEFAULT)
                 challenge = Base64.decode(challengeJson.getString("challenge"), Base64.DEFAULT)
                 if (challengeId.size != 16 || challenge.size != 32) {
@@ -262,17 +296,35 @@ class XorVpnService : VpnService() {
                 if (signatureBytes.size != 64) {
                     throw IllegalStateException("Invalid authentication signature")
                 }
+                val proofWindow = VpnConfig.currentWindowIndex()
+                val proofKeyVersion = (proofWindow and 0xFF).toByte()
+                val proofAuthKey = VpnConfig.deriveCryptoKeyForWindow(proofWindow)
+                val sessionKeys = deriveDataSessionKeys(
+                    keyVersion = proofKeyVersion,
+                    authKey = proofAuthKey,
+                    challengeId = challengeId,
+                    challenge = challenge,
+                    publicKeyBytes = publicKeyBytes,
+                    signatureBytes = signatureBytes,
+                )
                 val proof = JSONObject()
                     .put("challenge_id", Base64.encodeToString(challengeId, Base64.NO_WRAP))
                     .put("signature", Base64.encodeToString(signatureBytes, Base64.NO_WRAP))
                     .toString()
                     .toByteArray(Charsets.UTF_8)
-                sendEncrypted(socket, serverAddr, PKT_AUTH_PROOF, proof)
+                sendEncrypted(
+                    socket,
+                    serverAddr,
+                    PKT_AUTH_PROOF,
+                    proof,
+                    proofKeyVersion,
+                    proofAuthKey,
+                )
 
                 val result = receiveAuthenticatedPacket(socket)
-                when (result.first) {
-                    PKT_AUTH_OK -> return parseAuthOk(result.second)
-                    PKT_AUTH_DENY -> throw AuthDeniedException(denialReason(result.second))
+                when (result.type) {
+                    PKT_AUTH_OK -> return parseAuthOk(result.payload, sessionKeys)
+                    PKT_AUTH_DENY -> throw AuthDeniedException(denialReason(result.payload))
                     else -> throw IllegalStateException("Expected AUTH_OK or AUTH_DENY")
                 }
             } catch (e: AuthDeniedException) {
@@ -288,13 +340,14 @@ class XorVpnService : VpnService() {
         throw IllegalStateException("Authentication failed")
     }
 
-    private fun parseAuthOk(payload: ByteArray): AuthResult {
+    private fun parseAuthOk(payload: ByteArray, sessionKeys: DataSessionKeys): AuthResult {
         val json = JSONObject(payload.toString(Charsets.UTF_8))
         val status = json.requireString("status")
         require(status == "OK") { "Malformed AUTH_OK status" }
 
         val tunnelIp = json.requireString("tunnel_ip")
         requireValidTunnelIp(tunnelIp)
+        val tunnelIpBytes = parseIpv4Address(tunnelIp)
 
         val prefixLength = json.requireInt("prefix_length")
         require(prefixLength == 24) { "Malformed AUTH_OK prefix length" }
@@ -304,8 +357,12 @@ class XorVpnService : VpnService() {
 
         return AuthResult(
             tunnelIp = tunnelIp,
+            tunnelIpBytes = tunnelIpBytes,
             prefixLength = prefixLength,
             mtu = mtu,
+            sessionKeyVersion = sessionKeys.keyVersion,
+            clientToServerDataKey = sessionKeys.clientToServer,
+            serverToClientDataKey = sessionKeys.serverToClient,
         )
     }
 
@@ -364,12 +421,18 @@ class XorVpnService : VpnService() {
         serverAddr: InetAddress,
         type: Byte,
         payload: ByteArray,
+        keyVersion: Byte? = null,
+        key: ByteArray? = null,
     ) {
-        val packet = VpnConfig.encryptPacket(type, payload)
+        val packet = if (keyVersion != null && key != null) {
+            VpnConfig.encryptPacketWithKey(type, keyVersion, key, payload)
+        } else {
+            VpnConfig.encryptPacket(type, payload)
+        }
         socket.send(DatagramPacket(packet, packet.size, serverAddr, VpnConfig.SERVER_PORT))
     }
 
-    private fun receiveAuthenticatedPacket(socket: DatagramSocket): Pair<Byte, ByteArray> {
+    private fun receiveAuthenticatedPacket(socket: DatagramSocket): VpnConfig.AuthPacket {
         val deadline = System.currentTimeMillis() + AUTH_PACKET_TIMEOUT_MS
         val buffer = ByteArray(VpnConfig.MAX_UDP_PACKET_SIZE)
         while (true) {
@@ -378,10 +441,52 @@ class XorVpnService : VpnService() {
             socket.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             val reply = DatagramPacket(buffer, buffer.size)
             socket.receive(reply)
-            val authenticated = VpnConfig.decryptPacket(buffer.copyOf(reply.length))
+            val authenticated = VpnConfig.decryptAuthPacket(buffer.copyOf(reply.length))
             if (authenticated != null) return authenticated
         }
     }
+
+    private fun deriveDataSessionKeys(
+        keyVersion: Byte,
+        authKey: ByteArray,
+        challengeId: ByteArray,
+        challenge: ByteArray,
+        publicKeyBytes: ByteArray,
+        signatureBytes: ByteArray,
+    ): DataSessionKeys {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update("xor-vpn-auth-v1".toByteArray(Charsets.UTF_8))
+        digest.update(challengeId)
+        digest.update(challenge)
+        digest.update(deviceId.toByteArray(Charsets.UTF_8))
+        digest.update(publicKeyBytes)
+        digest.update(signatureBytes)
+        val transcriptHash = digest.digest()
+        return DataSessionKeys(
+            keyVersion = keyVersion,
+            clientToServer = VpnConfig.deriveSessionKey(
+                authKey,
+                transcriptHash,
+                "session-data-client-to-server",
+            ),
+            serverToClient = VpnConfig.deriveSessionKey(
+                authKey,
+                transcriptHash,
+                "session-data-server-to-client",
+            ),
+        )
+    }
+
+    private fun hasAssignedIpv4Source(packet: ByteArray, tunnelIpBytes: ByteArray): Boolean {
+        if (packet.size < 20 || ((packet[0].toInt() and 0xF0) ushr 4) != 4) return false
+        return packet[12] == tunnelIpBytes[0] &&
+            packet[13] == tunnelIpBytes[1] &&
+            packet[14] == tunnelIpBytes[2] &&
+            packet[15] == tunnelIpBytes[3]
+    }
+
+    private fun parseIpv4Address(ip: String): ByteArray =
+        ip.split(".").map { it.toInt().toByte() }.toByteArray()
 
     private fun requestSignature(challengeId: ByteArray, challenge: ByteArray): String {
         val channel = flutterChannel ?: error("Flutter authentication channel unavailable")
