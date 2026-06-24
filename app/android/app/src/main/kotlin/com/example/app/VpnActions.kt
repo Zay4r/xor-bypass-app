@@ -16,7 +16,7 @@ object VpnActions {
             .putString(PUBLIC_KEY_KEY, publicKey)
             .apply()
         val intent = Intent(context, XorVpnService::class.java).apply {
-            putExtra("buildNumber", Build.FINGERPRINT)
+            putExtra("buildNumber", BuildIdentifier.current())
             putExtra("deviceId", deviceId)
             putExtra("publicKey", publicKey)
         }

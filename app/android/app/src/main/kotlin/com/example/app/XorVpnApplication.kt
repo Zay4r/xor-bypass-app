@@ -4,6 +4,7 @@ import android.app.Application
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugins.GeneratedPluginRegistrant
 
 class XorVpnApplication : Application() {
     lateinit var flutterEngine: FlutterEngine
@@ -12,6 +13,7 @@ class XorVpnApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         flutterEngine = FlutterEngine(this)
+        GeneratedPluginRegistrant.registerWith(flutterEngine)
         XorVpnService.flutterChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL_NAME,

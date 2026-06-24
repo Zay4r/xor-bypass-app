@@ -85,7 +85,9 @@ class XorVpnService : VpnService() {
             if (running || handshakeInProgress) return START_NOT_STICKY
             handshakeInProgress = true
         }
-        buildNumber = intent?.getStringExtra("buildNumber") ?: Build.FINGERPRINT
+        buildNumber = BuildIdentifier.sanitize(
+            intent?.getStringExtra("buildNumber") ?: BuildIdentifier.current(),
+        )
         deviceId = intent?.getStringExtra("deviceId").orEmpty()
         publicKey = intent?.getStringExtra("publicKey").orEmpty()
         startForegroundNotification()
