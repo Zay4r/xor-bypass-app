@@ -21,6 +21,7 @@ class AppMonitorService : Service() {
     private var lastQueryTime = 0L
     private var targetAppActive = false
     private var disconnectScheduled = false
+    private var lastAutoStartTime = 0L
 
     private val disconnectRunnable = Runnable {
         disconnectScheduled = false
@@ -73,7 +74,11 @@ class AppMonitorService : Service() {
             }
         }
 
-        latestPackage?.let(::handleForegroundPackage)
+        if (latestPackage != null) {
+            handleForegroundPackage(latestPackage)
+        } else if (targetAppActive) {
+            startVpnIfIdle()
+        }
     }
 
     private fun handleForegroundPackage(packageName: String) {
@@ -89,7 +94,11 @@ class AppMonitorService : Service() {
             disconnectScheduled = false
             handler.removeCallbacks(disconnectRunnable)
             Log.d(TAG, "Target app opened: $packageName; connecting VPN")
-            VpnActions.startVpn(this)
+            startVpnIfIdle()
+        } else if (isTarget) {
+            disconnectScheduled = false
+            handler.removeCallbacks(disconnectRunnable)
+            startVpnIfIdle()
         } else if (!isTarget && targetAppActive) {
             targetAppActive = false
             if (!disconnectScheduled) {
@@ -97,6 +106,16 @@ class AppMonitorService : Service() {
                 handler.postDelayed(disconnectRunnable, DISCONNECT_DELAY_MS)
             }
         }
+    }
+
+    private fun startVpnIfIdle() {
+        if (XorVpnService.isStartingOrRunning()) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastAutoStartTime < AUTO_START_RETRY_MS) return
+
+        lastAutoStartTime = now
+        VpnActions.startVpn(this)
     }
 
     private fun startMonitorNotification() {
@@ -149,6 +168,7 @@ class AppMonitorService : Service() {
         private const val POLL_INTERVAL_MS = 750L
         private const val INITIAL_LOOKBACK_MS = 5_000L
         private const val DISCONNECT_DELAY_MS = 1_200L
+        private const val AUTO_START_RETRY_MS = 2_000L
 
     }
 }

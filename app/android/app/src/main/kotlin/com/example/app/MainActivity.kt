@@ -1,6 +1,5 @@
 package com.example.app
 
-import android.app.AppOpsManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -8,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
-import android.os.Process
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -37,7 +35,11 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
-        val request = usageAccessRequest ?: return
+        val request = usageAccessRequest
+        if (request == null) {
+            ensureSavedAutomationRunning()
+            return
+        }
 
         usageAccessRequest = null
         when (request) {
@@ -50,9 +52,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
             UsageAccessRequest.AUTOMATION -> {
-                if (hasUsageAccess() && VpnActions.monitorTargetPackages(this).isNotEmpty()) {
-                    VpnActions.startMonitor(this)
-                }
+                ensureSavedAutomationRunning()
             }
         }
     }
@@ -133,6 +133,10 @@ class MainActivity : FlutterActivity() {
                 "setAutomationTargets" -> {
                     configureAutomationTargets(parseTargetPackages(call.arguments))
                     result.success(null)
+                }
+
+                "getAutomationTargets" -> {
+                    result.success(ArrayList(VpnActions.monitorTargetPackages(this)))
                 }
 
                 "disconnect" -> {
@@ -273,6 +277,10 @@ class MainActivity : FlutterActivity() {
         VpnActions.startMonitor(this)
     }
 
+    private fun ensureSavedAutomationRunning() {
+        VpnActions.startMonitorIfConfigured(this)
+    }
+
     private fun requestVpnPermission() {
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent != null) {
@@ -324,13 +332,5 @@ class MainActivity : FlutterActivity() {
         clipboard.setPrimaryClip(ClipData.newPlainText("XorVPN update URL", updateUrl))
     }
 
-    private fun hasUsageAccess(): Boolean {
-        val appOps = getSystemService(AppOpsManager::class.java)
-        val mode = appOps.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            Process.myUid(),
-            packageName,
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
+    private fun hasUsageAccess(): Boolean = VpnActions.hasUsageAccess(this)
 }

@@ -62,7 +62,7 @@ android {
              buildConfigField("String", "SERVER_IP",
                 "\"${localProps["TH_SERVER_IP"]}\"")
             buildConfigField("int",    "SERVER_PORT",           "${localProps["SERVER_PORT"]}")
-            buildConfigField("long",   "ROTATION_INTERVAL_SEC", "1983L")
+            buildConfigField("long",   "ROTATION_INTERVAL_SEC", "66L")
         }
     }
 

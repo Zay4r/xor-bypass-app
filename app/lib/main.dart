@@ -39,7 +39,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'XorVPN',
+      title: 'HtetVPN',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -72,14 +72,19 @@ class VpnScreen extends StatefulWidget {
   State<VpnScreen> createState() => _VpnScreenState();
 }
 
-class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
+class _VpnScreenState extends State<VpnScreen>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   bool _connected = false;
   bool _holding = false;
   bool _monitorFacebook = false;
   bool _monitorChrome = false;
+  bool _monitorInstagram = false;
+  bool _monitorViber = false;
+  int _automationStateVersion = 0;
   _UpdateNotice? _updateNotice;
 
-  bool get _monitorApps => _monitorFacebook || _monitorChrome;
+  bool get _monitorApps =>
+      _monitorFacebook || _monitorChrome || _monitorInstagram || _monitorViber;
 
   List<String> get _monitorTargetPackages => <String>[
     if (_monitorFacebook) ...[
@@ -88,6 +93,8 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       'com.facebook.orca',
     ],
     if (_monitorChrome) 'com.android.chrome',
+    if (_monitorInstagram) 'com.instagram.android',
+    if (_monitorViber) 'com.viber.voip',
   ];
 
   static const _channel = MethodChannel('com.example.app/vpn');
@@ -140,6 +147,32 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
     }
   }
 
+  Future<void> _restoreAutomationTargets({int attempts = 4}) async {
+    final stateVersion = _automationStateVersion;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      try {
+        final targets = await _channel.invokeMethod<List<Object?>>(
+          'getAutomationTargets',
+        );
+        if (!mounted || stateVersion != _automationStateVersion) return;
+        final targetPackages = targets?.whereType<String>().toSet() ?? {};
+        setState(() {
+          _monitorFacebook =
+              targetPackages.contains('com.facebook.katana') ||
+              targetPackages.contains('com.facebook.lite') ||
+              targetPackages.contains('com.facebook.orca');
+          _monitorChrome = targetPackages.contains('com.android.chrome');
+          _monitorInstagram = targetPackages.contains('com.instagram.android');
+          _monitorViber = targetPackages.contains('com.viber.voip');
+        });
+        return;
+      } catch (_) {
+        if (attempt == attempts - 1) return;
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    }
+  }
+
   late AnimationController _warpLevelController;
   late Ticker _ticker;
   Duration _lastElapsed = Duration.zero;
@@ -156,6 +189,7 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     final rng = Random(_seed);
     const cornerAngles = [pi * 0.25, pi * 0.75, pi * 1.25, pi * 1.75];
@@ -232,6 +266,15 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
       });
       return null;
     });
+
+    _restoreAutomationTargets();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _restoreAutomationTargets(attempts: 1);
+    }
   }
 
   void _onTick(Duration elapsed) {
@@ -256,6 +299,7 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _warpLevelController.dispose();
     super.dispose();
@@ -357,23 +401,41 @@ class _VpnScreenState extends State<VpnScreen> with TickerProviderStateMixin {
             ),
 
             Positioned(
-              top: screen.height * 0.28,
+              top: screen.height * 0.14,
               left: 0,
               right: 0,
               child: Center(
                 child: _AppMonitorToggle(
                   facebookSelected: _monitorFacebook,
                   chromeSelected: _monitorChrome,
+                  instagramSelected: _monitorInstagram,
+                  viberSelected: _monitorViber,
                   enabled: !_holding && !_connected,
                   onFacebookChanged: (selected) {
                     setState(() {
+                      _automationStateVersion++;
                       _monitorFacebook = selected;
                     });
                     _syncAutomationTargets();
                   },
                   onChromeChanged: (selected) {
                     setState(() {
+                      _automationStateVersion++;
                       _monitorChrome = selected;
+                    });
+                    _syncAutomationTargets();
+                  },
+                  onInstagramChanged: (selected) {
+                    setState(() {
+                      _automationStateVersion++;
+                      _monitorInstagram = selected;
+                    });
+                    _syncAutomationTargets();
+                  },
+                  onViberChanged: (selected) {
+                    setState(() {
+                      _automationStateVersion++;
+                      _monitorViber = selected;
                     });
                     _syncAutomationTargets();
                   },
@@ -544,21 +606,33 @@ class _UpdateNoticeBanner extends StatelessWidget {
 class _AppMonitorToggle extends StatelessWidget {
   final bool facebookSelected;
   final bool chromeSelected;
+  final bool instagramSelected;
+  final bool viberSelected;
   final bool enabled;
   final ValueChanged<bool> onFacebookChanged;
   final ValueChanged<bool> onChromeChanged;
+  final ValueChanged<bool> onInstagramChanged;
+  final ValueChanged<bool> onViberChanged;
 
   const _AppMonitorToggle({
     required this.facebookSelected,
     required this.chromeSelected,
+    required this.instagramSelected,
+    required this.viberSelected,
     required this.enabled,
     required this.onFacebookChanged,
     required this.onChromeChanged,
+    required this.onInstagramChanged,
+    required this.onViberChanged,
   });
 
   @override
   Widget build(BuildContext context) {
-    final selected = facebookSelected || chromeSelected;
+    final selected =
+        facebookSelected ||
+        chromeSelected ||
+        instagramSelected ||
+        viberSelected;
 
     return Opacity(
       opacity: enabled ? 1.0 : 0.45,
@@ -609,6 +683,30 @@ class _AppMonitorToggle extends StatelessWidget {
                 painter: _ChromeLogoPainter(),
               ),
             ),
+            const SizedBox(height: 8),
+            _MonitorAppOption(
+              selected: instagramSelected,
+              enabled: enabled,
+              semanticLabel: 'Instagram app monitor',
+              label: 'Instagram',
+              onChanged: onInstagramChanged,
+              logo: CustomPaint(
+                size: const Size(38, 38),
+                painter: _InstagramLogoPainter(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            _MonitorAppOption(
+              selected: viberSelected,
+              enabled: enabled,
+              semanticLabel: 'Viber app monitor',
+              label: 'Viber',
+              onChanged: onViberChanged,
+              logo: CustomPaint(
+                size: const Size(38, 38),
+                painter: _ViberLogoPainter(),
+              ),
+            ),
           ],
         ),
       ),
@@ -651,7 +749,7 @@ class _MonitorAppOption extends StatelessWidget {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
           width: 168,
-          height: 62,
+          height: 54,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           decoration: BoxDecoration(
             color: fillColor,
@@ -780,6 +878,84 @@ class _ChromeLogoPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ChromeLogoPainter oldDelegate) => false;
+}
+
+class _InstagramLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final radius = size.shortestSide / 2;
+    final paint = Paint()
+      ..shader = const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Color(0xFFFEDA75),
+          Color(0xFFFA7E1E),
+          Color(0xFFD62976),
+          Color(0xFF962FBF),
+          Color(0xFF4F5BD5),
+        ],
+      ).createShader(rect);
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(radius * 0.32)),
+      paint,
+    );
+    final stroke = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size.shortestSide * 0.08
+      ..strokeCap = StrokeCap.round;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        rect.deflate(size.shortestSide * 0.22),
+        Radius.circular(radius * 0.20),
+      ),
+      stroke,
+    );
+    canvas.drawCircle(rect.center, size.shortestSide * 0.16, stroke);
+    canvas.drawCircle(
+      Offset(size.width * 0.70, size.height * 0.30),
+      size.shortestSide * 0.045,
+      Paint()..color = Colors.white,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_InstagramLogoPainter oldDelegate) => false;
+}
+
+class _ViberLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.shortestSide / 2;
+    canvas.drawCircle(center, radius, Paint()..color = const Color(0xFF665CAC));
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: 'V',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size.height * 0.62,
+          fontWeight: FontWeight.w800,
+          height: 1,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        center.dx - textPainter.width / 2,
+        center.dy - textPainter.height / 2,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ViberLogoPainter oldDelegate) => false;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

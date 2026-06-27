@@ -1,8 +1,10 @@
 package com.example.app
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Process
 import android.util.Log
 
 object VpnActions {
@@ -18,6 +20,8 @@ object VpnActions {
         "com.facebook.lite",
         "com.facebook.orca",
         "com.android.chrome",
+        "com.instagram.android",
+        "com.viber.voip",
     )
 
     fun startVpn(
@@ -104,11 +108,17 @@ object VpnActions {
         context.stopService(Intent(context, AppMonitorService::class.java))
     }
 
+    fun startMonitorIfConfigured(context: Context) {
+        if (hasUsageAccess(context) && monitorTargetPackages(context).isNotEmpty()) {
+            startMonitor(context)
+        }
+    }
+
     fun setMonitorTargetPackages(context: Context, targetPackages: Set<String>) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putStringSet(MONITOR_TARGET_PACKAGES_KEY, sanitizeTargetPackages(targetPackages))
-            .apply()
+            .commit()
     }
 
     fun monitorTargetPackages(context: Context): Set<String> {
@@ -116,6 +126,16 @@ object VpnActions {
         val targetPackages = preferences.getStringSet(MONITOR_TARGET_PACKAGES_KEY, emptySet())
             ?: emptySet()
         return sanitizeTargetPackages(targetPackages)
+    }
+
+    fun hasUsageAccess(context: Context): Boolean {
+        val appOps = context.getSystemService(AppOpsManager::class.java)
+        val mode = appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            context.packageName,
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
     }
 
     fun sanitizeTargetPackages(targetPackages: Iterable<String>): Set<String> =

@@ -13,7 +13,7 @@ object VpnConfig {
     val SERVER_IP: String = BuildConfig.SERVER_IP
     val SERVER_PORT: Int = BuildConfig.SERVER_PORT
     const val DNS_SERVER = "8.8.8.8" // googler
-    const val SESSION_NAME = "XorVPN"
+    const val SESSION_NAME = "HtetVPN"
     const val MAX_UDP_PACKET_SIZE = 1530 // 1500-byte payload + 30-byte protocol overhead
 
     private const val TAG = "VpnConfig"
