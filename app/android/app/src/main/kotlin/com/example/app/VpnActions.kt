@@ -97,10 +97,14 @@ object VpnActions {
 
     fun startMonitor(context: Context) {
         val intent = Intent(context, AppMonitorService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Unable to start automation monitor: ${e.message}")
         }
     }
 

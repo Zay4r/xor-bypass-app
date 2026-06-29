@@ -102,8 +102,6 @@ class XorVpnService : VpnService() {
 
     companion object {
         var flutterChannel: MethodChannel? = null
-        @Volatile
-        private var serviceStartingOrRunning = false
 
         private const val AUTH_MAX_ATTEMPTS = 3
         private const val AUTH_PACKET_TIMEOUT_MS = 5_000L
@@ -118,8 +116,6 @@ class XorVpnService : VpnService() {
             "com.instagram.android",
             "com.viber.voip",
         )
-
-        fun isStartingOrRunning(): Boolean = serviceStartingOrRunning
     }
 
     // -----------------------------------------------------------------------
@@ -134,7 +130,6 @@ class XorVpnService : VpnService() {
         synchronized(startLock) {
             if (running || handshakeInProgress) return START_NOT_STICKY
             handshakeInProgress = true
-            serviceStartingOrRunning = true
         }
         buildNumber = BuildIdentifier.sanitize(
             intent?.getStringExtra("buildNumber") ?: BuildIdentifier.current(),
@@ -305,9 +300,6 @@ class XorVpnService : VpnService() {
         } finally {
             synchronized(startLock) {
                 handshakeInProgress = false
-                if (!running) {
-                    serviceStartingOrRunning = false
-                }
             }
             buildNumber = ""
             appVersion = ""
@@ -652,7 +644,6 @@ class XorVpnService : VpnService() {
     private fun stopVpn() {
         if (!running && vpnInterface == null && udpSocket == null) {
             clearAssignedAuthResult()
-            serviceStartingOrRunning = false
             return
         }
 
@@ -660,7 +651,6 @@ class XorVpnService : VpnService() {
         vpnInterface = null
         clearAssignedAuthResult()
         running = false
-        serviceStartingOrRunning = false
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null
 

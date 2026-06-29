@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -20,15 +22,25 @@ class MainActivity : FlutterActivity() {
 
     private enum class UsageAccessRequest {
         CONNECT,
-        AUTOMATION,
+    }
+
+    private enum class AutomationSetupStep {
+        USAGE_ACCESS,
+        RESTRICTED_SETTINGS,
+        BATTERY,
     }
 
     private lateinit var methodChannel: MethodChannel
     private var usageAccessRequest: UsageAccessRequest? = null
+    private var automationSetupStep: AutomationSetupStep? = null
     private var pendingDeviceId: String? = null
     private var pendingPublicKey: String? = null
     private var pendingMonitorApps = false
     private var pendingTargetPackages: Set<String> = emptySet()
+    private var pendingAutomationTargetPackages: Set<String> = emptySet()
+    private var usageAccessStepComplete = false
+    private var restrictedSettingsStepComplete = false
+    private var batteryStepComplete = false
 
     override fun provideFlutterEngine(context: Context): FlutterEngine =
         (application as XorVpnApplication).flutterEngine
@@ -37,6 +49,7 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         val request = usageAccessRequest
         if (request == null) {
+            handleAutomationSetupResume()
             ensureSavedAutomationRunning()
             return
         }
@@ -50,9 +63,6 @@ class MainActivity : FlutterActivity() {
                     clearPendingConnect()
                     methodChannel.invokeMethod("onStatusChange", "error: Usage Access is required")
                 }
-            }
-            UsageAccessRequest.AUTOMATION -> {
-                ensureSavedAutomationRunning()
             }
         }
     }
@@ -131,8 +141,7 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "setAutomationTargets" -> {
-                    configureAutomationTargets(parseTargetPackages(call.arguments))
-                    result.success(null)
+                    result.success(ArrayList(configureAutomationTargets(parseTargetPackages(call.arguments))))
                 }
 
                 "getAutomationTargets" -> {
@@ -260,25 +269,84 @@ class MainActivity : FlutterActivity() {
         return VpnActions.sanitizeTargetPackages(rawPackages)
     }
 
-    private fun configureAutomationTargets(targetPackages: Set<String>) {
-        VpnActions.setMonitorTargetPackages(this, targetPackages)
+    private fun configureAutomationTargets(targetPackages: Set<String>): Set<String> {
         if (targetPackages.isEmpty()) {
-            if (usageAccessRequest == UsageAccessRequest.AUTOMATION) {
-                usageAccessRequest = null
-            }
+            automationSetupStep = null
+            pendingAutomationTargetPackages = emptySet()
             VpnActions.stopMonitor(this)
-            return
+            VpnActions.setMonitorTargetPackages(this, emptySet())
+            return emptySet()
         }
-        if (!hasUsageAccess()) {
-            usageAccessRequest = UsageAccessRequest.AUTOMATION
-            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            return
+        val hasUsageAccess = hasUsageAccess()
+        if (hasUsageAccess) {
+            usageAccessStepComplete = true
         }
-        VpnActions.startMonitor(this)
+        if (!usageAccessStepComplete && !hasUsageAccess) {
+            pendingAutomationTargetPackages = targetPackages
+            automationSetupStep = AutomationSetupStep.USAGE_ACCESS
+            openUsageAccessSettings()
+            return VpnActions.monitorTargetPackages(this)
+        }
+        if (!hasUsageAccess) {
+            if (!restrictedSettingsStepComplete) {
+                pendingAutomationTargetPackages = targetPackages
+                automationSetupStep = AutomationSetupStep.RESTRICTED_SETTINGS
+                openAppInfoSettings()
+                return VpnActions.monitorTargetPackages(this)
+            }
+            pendingAutomationTargetPackages = targetPackages
+            automationSetupStep = AutomationSetupStep.USAGE_ACCESS
+            openUsageAccessSettings()
+            return VpnActions.monitorTargetPackages(this)
+        }
+        if (!batteryStepComplete) {
+            pendingAutomationTargetPackages = targetPackages
+            automationSetupStep = AutomationSetupStep.BATTERY
+            requestBatteryOptimizationBypassForAutomation()
+            return VpnActions.monitorTargetPackages(this)
+        }
+        completeAutomationTargets(targetPackages)
+        return VpnActions.monitorTargetPackages(this)
     }
 
     private fun ensureSavedAutomationRunning() {
         VpnActions.startMonitorIfConfigured(this)
+    }
+
+    private fun handleAutomationSetupResume() {
+        val step = automationSetupStep ?: return
+        automationSetupStep = null
+        when (step) {
+            AutomationSetupStep.USAGE_ACCESS -> {
+                usageAccessStepComplete = true
+            }
+            AutomationSetupStep.RESTRICTED_SETTINGS -> {
+                restrictedSettingsStepComplete = true
+            }
+            AutomationSetupStep.BATTERY -> {
+                batteryStepComplete = true
+                val targetPackages = pendingAutomationTargetPackages
+                pendingAutomationTargetPackages = emptySet()
+                if (targetPackages.isNotEmpty() && hasUsageAccess()) {
+                    completeAutomationTargets(targetPackages)
+                    notifyAutomationTargetsChanged()
+                }
+            }
+        }
+    }
+
+    private fun completeAutomationTargets(targetPackages: Set<String>) {
+        VpnActions.setMonitorTargetPackages(this, targetPackages)
+        VpnActions.startMonitor(this)
+    }
+
+    private fun notifyAutomationTargetsChanged() {
+        if (::methodChannel.isInitialized) {
+            methodChannel.invokeMethod(
+                "onAutomationTargetsChanged",
+                ArrayList(VpnActions.monitorTargetPackages(this)),
+            )
+        }
     }
 
     private fun requestVpnPermission() {
@@ -303,6 +371,7 @@ class MainActivity : FlutterActivity() {
         if (monitorApps) {
             VpnActions.setMonitorTargetPackages(this, targetPackages)
             VpnActions.startMonitor(this)
+            requestBatteryOptimizationBypassForAutomation()
         } else {
             VpnActions.stopMonitor(this)
         }
@@ -333,4 +402,44 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun hasUsageAccess(): Boolean = VpnActions.hasUsageAccess(this)
+
+    private fun openUsageAccessSettings() {
+        startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+    }
+
+    private fun openAppInfoSettings() {
+        val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        try {
+            startActivity(settingsIntent)
+        } catch (_: ActivityNotFoundException) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_SETTINGS))
+        }
+    }
+
+    private fun shouldRequestBatteryOptimizationBypass(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        val powerManager = getSystemService(PowerManager::class.java)
+        return !powerManager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestBatteryOptimizationBypassForAutomation() {
+        if (shouldRequestBatteryOptimizationBypass()) {
+            val requestIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            try {
+                startActivity(requestIntent)
+                return
+            } catch (_: ActivityNotFoundException) {
+                // Fall through to the app-level settings page below.
+            }
+        }
+        try {
+            openAppInfoSettings()
+        } catch (_: ActivityNotFoundException) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
 }

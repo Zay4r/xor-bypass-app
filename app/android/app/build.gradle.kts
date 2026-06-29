@@ -57,7 +57,7 @@ android {
         }
         create("th") {
             dimension = "env"
-            applicationId = "com.example.app.th"
+            applicationId = "com.zay4r.htetvpn.th"
             versionNameSuffix = "-th"
              buildConfigField("String", "SERVER_IP",
                 "\"${localProps["TH_SERVER_IP"]}\"")
@@ -79,7 +79,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

@@ -136,15 +136,47 @@ class _VpnScreenState extends State<VpnScreen>
     }
   }
 
-  Future<void> _syncAutomationTargets() async {
+  Future<void> _setAutomationSelection({
+    bool? facebook,
+    bool? chrome,
+    bool? instagram,
+    bool? viber,
+  }) async {
+    final targetPackages = <String>[
+      if (facebook ?? _monitorFacebook) ...[
+        'com.facebook.katana',
+        'com.facebook.lite',
+        'com.facebook.orca',
+      ],
+      if (chrome ?? _monitorChrome) 'com.android.chrome',
+      if (instagram ?? _monitorInstagram) 'com.instagram.android',
+      if (viber ?? _monitorViber) 'com.viber.voip',
+    ];
+    final stateVersion = ++_automationStateVersion;
     try {
-      await _channel.invokeMethod(
+      final targets = await _channel.invokeMethod<List<Object?>>(
         'setAutomationTargets',
-        jsonEncode(<String, Object>{'targetPackages': _monitorTargetPackages}),
+        jsonEncode(<String, Object>{'targetPackages': targetPackages}),
+      );
+      if (!mounted || stateVersion != _automationStateVersion) return;
+      _applyAutomationTargetPackages(
+        targets?.whereType<String>().toSet() ?? {},
       );
     } catch (_) {
-      // Native permission UI may interrupt this call; the next toggle/connect resyncs state.
+      if (mounted) _restoreAutomationTargets(attempts: 1);
     }
+  }
+
+  void _applyAutomationTargetPackages(Set<String> targetPackages) {
+    setState(() {
+      _monitorFacebook =
+          targetPackages.contains('com.facebook.katana') ||
+          targetPackages.contains('com.facebook.lite') ||
+          targetPackages.contains('com.facebook.orca');
+      _monitorChrome = targetPackages.contains('com.android.chrome');
+      _monitorInstagram = targetPackages.contains('com.instagram.android');
+      _monitorViber = targetPackages.contains('com.viber.voip');
+    });
   }
 
   Future<void> _restoreAutomationTargets({int attempts = 4}) async {
@@ -156,15 +188,7 @@ class _VpnScreenState extends State<VpnScreen>
         );
         if (!mounted || stateVersion != _automationStateVersion) return;
         final targetPackages = targets?.whereType<String>().toSet() ?? {};
-        setState(() {
-          _monitorFacebook =
-              targetPackages.contains('com.facebook.katana') ||
-              targetPackages.contains('com.facebook.lite') ||
-              targetPackages.contains('com.facebook.orca');
-          _monitorChrome = targetPackages.contains('com.android.chrome');
-          _monitorInstagram = targetPackages.contains('com.instagram.android');
-          _monitorViber = targetPackages.contains('com.viber.voip');
-        });
+        _applyAutomationTargetPackages(targetPackages);
         return;
       } catch (_) {
         if (attempt == attempts - 1) return;
@@ -232,6 +256,14 @@ class _VpnScreenState extends State<VpnScreen>
           challengeId: arguments['challengeId']! as String,
           challenge: arguments['challenge']! as String,
         );
+      }
+      if (call.method == 'onAutomationTargetsChanged') {
+        final targetPackages =
+            (call.arguments as List<Object?>?)?.whereType<String>().toSet() ??
+            {};
+        _automationStateVersion++;
+        _applyAutomationTargetPackages(targetPackages);
+        return null;
       }
       if (call.method != 'onStatusChange') return null;
       final String status = call.arguments as String;
@@ -412,32 +444,16 @@ class _VpnScreenState extends State<VpnScreen>
                   viberSelected: _monitorViber,
                   enabled: !_holding && !_connected,
                   onFacebookChanged: (selected) {
-                    setState(() {
-                      _automationStateVersion++;
-                      _monitorFacebook = selected;
-                    });
-                    _syncAutomationTargets();
+                    _setAutomationSelection(facebook: selected);
                   },
                   onChromeChanged: (selected) {
-                    setState(() {
-                      _automationStateVersion++;
-                      _monitorChrome = selected;
-                    });
-                    _syncAutomationTargets();
+                    _setAutomationSelection(chrome: selected);
                   },
                   onInstagramChanged: (selected) {
-                    setState(() {
-                      _automationStateVersion++;
-                      _monitorInstagram = selected;
-                    });
-                    _syncAutomationTargets();
+                    _setAutomationSelection(instagram: selected);
                   },
                   onViberChanged: (selected) {
-                    setState(() {
-                      _automationStateVersion++;
-                      _monitorViber = selected;
-                    });
-                    _syncAutomationTargets();
+                    _setAutomationSelection(viber: selected);
                   },
                 ),
               ),
