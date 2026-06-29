@@ -57,7 +57,7 @@ android {
         }
         create("th") {
             dimension = "env"
-            applicationId = "com.zay4r.htetvpn.th"
+            applicationId = "com.htetvpn.th"
             versionNameSuffix = "-th"
              buildConfigField("String", "SERVER_IP",
                 "\"${localProps["TH_SERVER_IP"]}\"")

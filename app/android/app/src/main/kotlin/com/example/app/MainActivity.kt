@@ -425,21 +425,44 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun requestBatteryOptimizationBypassForAutomation() {
-        if (shouldRequestBatteryOptimizationBypass()) {
-            val requestIntent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            try {
-                startActivity(requestIntent)
-                return
-            } catch (_: ActivityNotFoundException) {
-                // Fall through to the app-level settings page below.
-            }
-        }
+        if (openAppBatterySettings()) return
         try {
             openAppInfoSettings()
         } catch (_: ActivityNotFoundException) {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
+    }
+
+    private fun openAppBatterySettings(): Boolean {
+        val packageUri = Uri.parse("package:$packageName")
+        val candidates = listOf(
+            Intent("com.coloros.oppoguardelf.intent.action.APP_POWER_USAGE_DETAIL").apply {
+                putExtra("pkg_name", packageName)
+            },
+            Intent("com.coloros.powermanager.action.APP_BATTERY_DETAIL").apply {
+                putExtra("pkg_name", packageName)
+                putExtra("packageName", packageName)
+            },
+            Intent("com.oplus.powermanager.fuelgaue.PowerConsumptionActivity").apply {
+                putExtra("pkg_name", packageName)
+            },
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = packageUri
+                putExtra(":settings:fragment_args_key", "battery")
+            },
+        )
+
+        for (intent in candidates) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                startActivity(intent)
+                return true
+            } catch (_: ActivityNotFoundException) {
+                // Try the next OEM/settings variant.
+            } catch (_: SecurityException) {
+                // Some OEM settings activities are not exported.
+            }
+        }
+        return false
     }
 }
