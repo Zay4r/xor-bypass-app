@@ -7,8 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.VpnService
-import android.os.Build
-import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -24,23 +22,14 @@ class MainActivity : FlutterActivity() {
         CONNECT,
     }
 
-    private enum class AutomationSetupStep {
-        USAGE_ACCESS,
-        RESTRICTED_SETTINGS,
-        BATTERY,
-    }
-
     private lateinit var methodChannel: MethodChannel
     private var usageAccessRequest: UsageAccessRequest? = null
-    private var automationSetupStep: AutomationSetupStep? = null
     private var pendingDeviceId: String? = null
     private var pendingPublicKey: String? = null
     private var pendingMonitorApps = false
     private var pendingTargetPackages: Set<String> = emptySet()
     private var pendingAutomationTargetPackages: Set<String> = emptySet()
-    private var usageAccessStepComplete = false
-    private var restrictedSettingsStepComplete = false
-    private var batteryStepComplete = false
+    private var automationSetupPromptStep = 0
 
     override fun provideFlutterEngine(context: Context): FlutterEngine =
         (application as XorVpnApplication).flutterEngine
@@ -49,7 +38,7 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         val request = usageAccessRequest
         if (request == null) {
-            handleAutomationSetupResume()
+            completePendingAutomationSetupIfAllowed()
             ensureSavedAutomationRunning()
             return
         }
@@ -271,41 +260,46 @@ class MainActivity : FlutterActivity() {
 
     private fun configureAutomationTargets(targetPackages: Set<String>): Set<String> {
         if (targetPackages.isEmpty()) {
-            automationSetupStep = null
-            pendingAutomationTargetPackages = emptySet()
             VpnActions.stopMonitor(this)
             VpnActions.setMonitorTargetPackages(this, emptySet())
+            pendingAutomationTargetPackages = emptySet()
+            automationSetupPromptStep = 0
             return emptySet()
         }
-        val hasUsageAccess = hasUsageAccess()
-        if (hasUsageAccess) {
-            usageAccessStepComplete = true
+
+        pendingAutomationTargetPackages = targetPackages
+
+        if (automationSetupPromptStep == 0 && hasUsageAccess()) {
+            pendingAutomationTargetPackages = emptySet()
+            completeAutomationTargets(targetPackages)
+            return VpnActions.monitorTargetPackages(this)
         }
-        if (!usageAccessStepComplete && !hasUsageAccess) {
-            pendingAutomationTargetPackages = targetPackages
-            automationSetupStep = AutomationSetupStep.USAGE_ACCESS
+
+        if (automationSetupPromptStep == 0) {
+            automationSetupPromptStep = 1
             openUsageAccessSettings()
             return VpnActions.monitorTargetPackages(this)
         }
-        if (!hasUsageAccess) {
-            if (!restrictedSettingsStepComplete) {
-                pendingAutomationTargetPackages = targetPackages
-                automationSetupStep = AutomationSetupStep.RESTRICTED_SETTINGS
-                openAppInfoSettings()
-                return VpnActions.monitorTargetPackages(this)
-            }
-            pendingAutomationTargetPackages = targetPackages
-            automationSetupStep = AutomationSetupStep.USAGE_ACCESS
+
+        if (automationSetupPromptStep == 1) {
+            automationSetupPromptStep = 2
+            openAppInfoSettings()
+            return VpnActions.monitorTargetPackages(this)
+        }
+
+        if (automationSetupPromptStep == 2) {
+            automationSetupPromptStep = 3
             openUsageAccessSettings()
             return VpnActions.monitorTargetPackages(this)
         }
-        if (!batteryStepComplete) {
-            pendingAutomationTargetPackages = targetPackages
-            automationSetupStep = AutomationSetupStep.BATTERY
-            requestBatteryOptimizationBypassForAutomation()
-            return VpnActions.monitorTargetPackages(this)
+
+        if (hasUsageAccess()) {
+            automationSetupPromptStep = 0
+            pendingAutomationTargetPackages = emptySet()
+            completeAutomationTargets(targetPackages)
+        } else {
+            openUsageAccessSettings()
         }
-        completeAutomationTargets(targetPackages)
         return VpnActions.monitorTargetPackages(this)
     }
 
@@ -313,34 +307,20 @@ class MainActivity : FlutterActivity() {
         VpnActions.startMonitorIfConfigured(this)
     }
 
-    private fun handleAutomationSetupResume() {
-        val step = automationSetupStep ?: return
-        automationSetupStep = null
-        when (step) {
-            AutomationSetupStep.USAGE_ACCESS -> {
-                usageAccessStepComplete = true
-            }
-            AutomationSetupStep.RESTRICTED_SETTINGS -> {
-                restrictedSettingsStepComplete = true
-            }
-            AutomationSetupStep.BATTERY -> {
-                batteryStepComplete = true
-                val targetPackages = pendingAutomationTargetPackages
-                pendingAutomationTargetPackages = emptySet()
-                if (targetPackages.isNotEmpty() && hasUsageAccess()) {
-                    completeAutomationTargets(targetPackages)
-                    notifyAutomationTargetsChanged()
-                }
-            }
-        }
-    }
-
     private fun completeAutomationTargets(targetPackages: Set<String>) {
         VpnActions.setMonitorTargetPackages(this, targetPackages)
         VpnActions.startMonitor(this)
     }
 
-    private fun notifyAutomationTargetsChanged() {
+    private fun completePendingAutomationSetupIfAllowed() {
+        val targetPackages = pendingAutomationTargetPackages
+        if (automationSetupPromptStep < 3 || targetPackages.isEmpty() || !hasUsageAccess()) {
+            return
+        }
+
+        automationSetupPromptStep = 0
+        pendingAutomationTargetPackages = emptySet()
+        completeAutomationTargets(targetPackages)
         if (::methodChannel.isInitialized) {
             methodChannel.invokeMethod(
                 "onAutomationTargetsChanged",
@@ -371,7 +351,6 @@ class MainActivity : FlutterActivity() {
         if (monitorApps) {
             VpnActions.setMonitorTargetPackages(this, targetPackages)
             VpnActions.startMonitor(this)
-            requestBatteryOptimizationBypassForAutomation()
         } else {
             VpnActions.stopMonitor(this)
         }
@@ -416,53 +395,5 @@ class MainActivity : FlutterActivity() {
         } catch (_: ActivityNotFoundException) {
             startActivity(Intent(Settings.ACTION_APPLICATION_SETTINGS))
         }
-    }
-
-    private fun shouldRequestBatteryOptimizationBypass(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
-        val powerManager = getSystemService(PowerManager::class.java)
-        return !powerManager.isIgnoringBatteryOptimizations(packageName)
-    }
-
-    private fun requestBatteryOptimizationBypassForAutomation() {
-        if (openAppBatterySettings()) return
-        try {
-            openAppInfoSettings()
-        } catch (_: ActivityNotFoundException) {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }
-    }
-
-    private fun openAppBatterySettings(): Boolean {
-        val packageUri = Uri.parse("package:$packageName")
-        val candidates = listOf(
-            Intent("com.coloros.oppoguardelf.intent.action.APP_POWER_USAGE_DETAIL").apply {
-                putExtra("pkg_name", packageName)
-            },
-            Intent("com.coloros.powermanager.action.APP_BATTERY_DETAIL").apply {
-                putExtra("pkg_name", packageName)
-                putExtra("packageName", packageName)
-            },
-            Intent("com.oplus.powermanager.fuelgaue.PowerConsumptionActivity").apply {
-                putExtra("pkg_name", packageName)
-            },
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = packageUri
-                putExtra(":settings:fragment_args_key", "battery")
-            },
-        )
-
-        for (intent in candidates) {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            try {
-                startActivity(intent)
-                return true
-            } catch (_: ActivityNotFoundException) {
-                // Try the next OEM/settings variant.
-            } catch (_: SecurityException) {
-                // Some OEM settings activities are not exported.
-            }
-        }
-        return false
     }
 }
