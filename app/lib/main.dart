@@ -120,6 +120,44 @@ class _VpnScreenState extends State<VpnScreen>
 
   Future<void> _stopVpn() async => _channel.invokeMethod('disconnect');
 
+  Future<bool> _hasUsageAccess() async {
+    try {
+      return await _channel.invokeMethod<bool>('hasUsageAccess') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _confirmUsageAccessDisclosure() async {
+    if (!mounted) return false;
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF071522),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        title: const Text('Allow app usage access?'),
+        content: const Text(
+          'Htet VPN accesses app usage activity only to detect when selected '
+          'apps leave the foreground and automatically stop the VPN. This data '
+          'stays on your device and is not sold or used for ads.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    return accepted ?? false;
+  }
+
   Future<void> _openUpdateUrl(String updateUrl) async {
     try {
       await _channel.invokeMethod('openUpdateUrl', updateUrl);
@@ -152,6 +190,10 @@ class _VpnScreenState extends State<VpnScreen>
       if (instagram ?? _monitorInstagram) 'com.instagram.android',
       if (viber ?? _monitorViber) 'com.viber.voip',
     ];
+    if (targetPackages.isNotEmpty && !await _hasUsageAccess()) {
+      final accepted = await _confirmUsageAccessDisclosure();
+      if (!accepted) return;
+    }
     final stateVersion = ++_automationStateVersion;
     try {
       final targets = await _channel.invokeMethod<List<Object?>>(
@@ -166,6 +208,13 @@ class _VpnScreenState extends State<VpnScreen>
       if (mounted) _restoreAutomationTargets(attempts: 1);
     }
   }
+
+  Future<void> _clearAutomationSelection() => _setAutomationSelection(
+    facebook: false,
+    chrome: false,
+    instagram: false,
+    viber: false,
+  );
 
   void _applyAutomationTargetPackages(Set<String> targetPackages) {
     setState(() {
@@ -361,7 +410,14 @@ class _VpnScreenState extends State<VpnScreen>
     );
   }
 
-  void _onConnected() {
+  Future<void> _onConnected() async {
+    if (_monitorApps) {
+      final hasAccess = await _hasUsageAccess();
+      if (!mounted) return;
+      if (!hasAccess && !await _confirmUsageAccessDisclosure()) {
+        return;
+      }
+    }
     _startVpn();
     HapticFeedback.heavyImpact();
     setState(() {
@@ -455,6 +511,7 @@ class _VpnScreenState extends State<VpnScreen>
                   onViberChanged: (selected) {
                     _setAutomationSelection(viber: selected);
                   },
+                  onClear: _clearAutomationSelection,
                 ),
               ),
             ),
@@ -503,7 +560,7 @@ class _VpnScreenState extends State<VpnScreen>
                     child: _LightSwitch(
                       connected: _connected,
                       warpLevel: w,
-                      onConnect: _onConnected,
+                      onConnect: () => _onConnected(),
                       onDisconnect: _onDisconnect,
                     ),
                   ),
@@ -629,6 +686,7 @@ class _AppMonitorToggle extends StatelessWidget {
   final ValueChanged<bool> onChromeChanged;
   final ValueChanged<bool> onInstagramChanged;
   final ValueChanged<bool> onViberChanged;
+  final VoidCallback onClear;
 
   const _AppMonitorToggle({
     required this.facebookSelected,
@@ -640,6 +698,7 @@ class _AppMonitorToggle extends StatelessWidget {
     required this.onChromeChanged,
     required this.onInstagramChanged,
     required this.onViberChanged,
+    required this.onClear,
   });
 
   @override
@@ -723,6 +782,29 @@ class _AppMonitorToggle extends StatelessWidget {
                 painter: _ViberLogoPainter(),
               ),
             ),
+            if (selected) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: 168,
+                height: 38,
+                child: OutlinedButton.icon(
+                  onPressed: enabled ? onClear : null,
+                  icon: const Icon(Icons.close, size: 17),
+                  label: const Text('Disable automation'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white.withValues(alpha: 0.88),
+                    side: BorderSide(color: _red.withValues(alpha: 0.50)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

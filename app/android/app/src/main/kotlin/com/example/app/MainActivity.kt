@@ -137,6 +137,10 @@ class MainActivity : FlutterActivity() {
                     result.success(ArrayList(VpnActions.monitorTargetPackages(this)))
                 }
 
+                "hasUsageAccess" -> {
+                    result.success(hasUsageAccess())
+                }
+
                 "disconnect" -> {
                     VpnActions.stopVpn(this)
                     result.success(null)
