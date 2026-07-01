@@ -273,7 +273,8 @@ class MainActivity : FlutterActivity() {
 
         pendingAutomationTargetPackages = targetPackages
 
-        if (automationSetupPromptStep == 0 && hasUsageAccess()) {
+        if (hasUsageAccess()) {
+            automationSetupPromptStep = 0
             pendingAutomationTargetPackages = emptySet()
             completeAutomationTargets(targetPackages)
             return VpnActions.monitorTargetPackages(this)

@@ -34,6 +34,36 @@ final class _UpdateNotice {
   final String? updateUrl;
 }
 
+enum _ConnectionVisualState { offline, connecting, connected }
+
+Color _stateBackdropColor(_ConnectionVisualState state, double pulse) {
+  return switch (state) {
+    _ConnectionVisualState.offline => Color.lerp(
+      const Color(0xFF081522),
+      const Color(0xFF0C1D2E),
+      0.28 + pulse * 0.08,
+    )!,
+    _ConnectionVisualState.connecting => Color.lerp(
+      const Color(0xFF101323),
+      const Color(0xFF1C0B15),
+      0.48 + pulse * 0.26,
+    )!,
+    _ConnectionVisualState.connected => Color.lerp(
+      const Color(0xFF10080D),
+      const Color(0xFF240608),
+      pulse,
+    )!,
+  };
+}
+
+Color _stateAccent(_ConnectionVisualState state) {
+  return switch (state) {
+    _ConnectionVisualState.offline => const Color(0xFF74D7FF),
+    _ConnectionVisualState.connecting => const Color(0xFFFFB34A),
+    _ConnectionVisualState.connected => _red,
+  };
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
   @override
@@ -85,6 +115,12 @@ class _VpnScreenState extends State<VpnScreen>
 
   bool get _monitorApps =>
       _monitorFacebook || _monitorChrome || _monitorInstagram || _monitorViber;
+
+  _ConnectionVisualState get _visualState {
+    if (_connected) return _ConnectionVisualState.connected;
+    if (_holding) return _ConnectionVisualState.connecting;
+    return _ConnectionVisualState.offline;
+  }
 
   List<String> get _monitorTargetPackages => <String>[
     if (_monitorFacebook) ...[
@@ -337,10 +373,19 @@ class _VpnScreenState extends State<VpnScreen>
         if (status == 'connected') {
           _connected = true;
           _holding = false;
-          _warpLevelController.value = 1.0;
+          _warpLevelController.animateTo(
+            1.0,
+            duration: const Duration(milliseconds: 520),
+            curve: Curves.easeOutCubic,
+          );
         } else if (status == 'connecting') {
           _holding = true;
           _connected = false;
+          _warpLevelController.animateTo(
+            0.62,
+            duration: const Duration(milliseconds: 900),
+            curve: Curves.easeOutCubic,
+          );
         } else if (status == 'disconnected' || status.startsWith('error')) {
           _resetToDisconnected();
         }
@@ -424,6 +469,11 @@ class _VpnScreenState extends State<VpnScreen>
       _connected = false;
       _holding = true;
     });
+    _warpLevelController.animateTo(
+      0.62,
+      duration: const Duration(milliseconds: 900),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   void _onDisconnect() {
@@ -436,6 +486,7 @@ class _VpnScreenState extends State<VpnScreen>
   Widget build(BuildContext context) {
     final screen = MediaQuery.of(context).size;
     final w = _warpLevelController.value;
+    final visualState = _visualState;
 
     // Starfield origin: center of screen (where switch lives)
     _switchCenter = Offset(screen.width / 2, screen.height - 160);
@@ -449,7 +500,22 @@ class _VpnScreenState extends State<VpnScreen>
           fit: StackFit.expand,
           children: [
             // Background
-            ColoredBox(color: Color.lerp(_navy, const Color(0xFF080F18), w)!),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 480),
+              curve: Curves.easeOutCubic,
+              color: _stateBackdropColor(visualState, w),
+            ),
+
+            RepaintBoundary(
+              child: CustomPaint(
+                painter: _ConnectionAuraPainter(
+                  state: visualState,
+                  pulse: w,
+                  switchCenter: _switchCenter,
+                ),
+                child: const SizedBox.expand(),
+              ),
+            ),
 
             // Warp starfield
             RepaintBoundary(
@@ -464,27 +530,13 @@ class _VpnScreenState extends State<VpnScreen>
               ),
             ),
 
-            // Status label top-center
+            // Dynamic island status
             Positioned(
-              top: 80,
+              top: max(18.0, MediaQuery.of(context).padding.top + 10),
               left: 0,
               right: 0,
-              child: Column(
-                children: [
-                  Text(
-                    _connected ? 'CONNECTED' : 'DISCONNECTED',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: _connected
-                          ? _red.withValues(alpha: 0.9)
-                          : Colors.white.withValues(alpha: 0.25),
-                      fontSize: 11,
-                      letterSpacing: 3,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                ],
+              child: Center(
+                child: _DynamicIslandStatus(state: visualState, warpLevel: w),
               ),
             ),
 
@@ -494,6 +546,7 @@ class _VpnScreenState extends State<VpnScreen>
               right: 0,
               child: Center(
                 child: _AppMonitorToggle(
+                  state: visualState,
                   facebookSelected: _monitorFacebook,
                   chromeSelected: _monitorChrome,
                   instagramSelected: _monitorInstagram,
@@ -542,23 +595,12 @@ class _VpnScreenState extends State<VpnScreen>
               right: 0,
               child: Column(
                 children: [
-                  Text(
-                    _connected
-                        ? 'slide down to disconnect'
-                        : _holding
-                        ? 'connecting...'
-                        : 'slide up to connect',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.35),
-                      fontSize: 13,
-                      letterSpacing: 1,
-                    ),
-                  ),
+                  _ConnectionActionHint(state: visualState),
                   const SizedBox(height: 24),
                   Center(
                     child: _LightSwitch(
                       connected: _connected,
+                      connecting: _holding,
                       warpLevel: w,
                       onConnect: () => _onConnected(),
                       onDisconnect: _onDisconnect,
@@ -571,6 +613,320 @@ class _VpnScreenState extends State<VpnScreen>
         ),
       ),
     );
+  }
+}
+
+class _DynamicIslandStatus extends StatelessWidget {
+  final _ConnectionVisualState state;
+  final double warpLevel;
+
+  const _DynamicIslandStatus({required this.state, required this.warpLevel});
+
+  @override
+  Widget build(BuildContext context) {
+    final active = state != _ConnectionVisualState.offline;
+    final connected = state == _ConnectionVisualState.connected;
+    final connecting = state == _ConnectionVisualState.connecting;
+    final width = connected ? 206.0 : (connecting ? 190.0 : 152.0);
+    final label = switch (state) {
+      _ConnectionVisualState.offline => 'Ready',
+      _ConnectionVisualState.connecting => 'Connecting',
+      _ConnectionVisualState.connected => 'Connected',
+    };
+    final accent = Color.lerp(_stateAccent(state), _red, warpLevel * 0.25)!;
+    final dotColor = switch (state) {
+      _ConnectionVisualState.offline => const Color(0xFF72DCFF),
+      _ConnectionVisualState.connecting => const Color(0xFFFFB23D),
+      _ConnectionVisualState.connected => const Color(0xFF3DFF84),
+    };
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      width: width,
+      height: active ? 56 : 52,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(31),
+        boxShadow: [
+          BoxShadow(
+            color: accent.withValues(alpha: connected ? 0.28 : 0.14),
+            blurRadius: connected ? 34 : 22,
+            spreadRadius: connected ? 2 : 0,
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.38),
+            blurRadius: 22,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: CustomPaint(
+        painter: _DynamicIslandRingPainter(
+          progress: connected ? 1 : (connecting ? 0.62 : 0.28),
+          color: accent,
+        ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 13),
+          decoration: BoxDecoration(
+            color: const Color(
+              0xFF02070D,
+            ).withValues(alpha: active ? 0.98 : 0.88),
+            borderRadius: BorderRadius.circular(27),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: active ? 0.12 : 0.08),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
+                width: active ? 34 : 30,
+                height: active ? 34 : 30,
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accent.withValues(alpha: active ? 0.22 : 0.14),
+                  border: Border.all(
+                    color: accent.withValues(alpha: active ? 0.56 : 0.34),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: active ? 0.25 : 0.12),
+                      blurRadius: 14,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+                child: ClipOval(
+                  child: Image.asset(
+                    'assets/logo.png',
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Icon(
+                      Icons.shield_rounded,
+                      color: active ? _litText : Colors.white70,
+                      size: 18,
+                    ),
+                  ),
+                ),
+              ),
+              AnimatedSize(
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(width: 10),
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.fade,
+                      softWrap: false,
+                      style: TextStyle(
+                        color: active
+                            ? _litText
+                            : Colors.white.withValues(alpha: 0.78),
+                        fontSize: active ? 14 : 13,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 260),
+                      width: connecting ? 9 : 7,
+                      height: connecting ? 9 : 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: dotColor,
+                        boxShadow: [
+                          BoxShadow(
+                            color: dotColor.withValues(alpha: 0.50),
+                            blurRadius: connecting ? 16 : 10,
+                            spreadRadius: connecting ? 2 : 1,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DynamicIslandRingPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+
+  const _DynamicIslandRingPainter({
+    required this.progress,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (progress <= 0) return;
+
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(1.4),
+      Radius.circular(size.height / 2),
+    );
+    final glow = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 6
+      ..color = color.withValues(alpha: 0.16 * progress)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
+    final ring = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2
+      ..shader = SweepGradient(
+        colors: [
+          color.withValues(alpha: 0.16),
+          color.withValues(alpha: 0.95),
+          Colors.white.withValues(alpha: 0.82),
+          color.withValues(alpha: 0.95),
+          color.withValues(alpha: 0.16),
+        ],
+        stops: const [0, 0.25, 0.5, 0.75, 1],
+      ).createShader(rect);
+
+    canvas.drawRRect(rrect, glow);
+    canvas.drawRRect(rrect, ring);
+  }
+
+  @override
+  bool shouldRepaint(_DynamicIslandRingPainter oldDelegate) {
+    return oldDelegate.progress != progress || oldDelegate.color != color;
+  }
+}
+
+class _ConnectionActionHint extends StatelessWidget {
+  final _ConnectionVisualState state;
+
+  const _ConnectionActionHint({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _stateAccent(state);
+    final text = switch (state) {
+      _ConnectionVisualState.offline => 'SLIDE UP TO CONNECT',
+      _ConnectionVisualState.connecting => 'SECURING LINK',
+      _ConnectionVisualState.connected => 'SLIDE DOWN TO DISCONNECT',
+    };
+    final icon = switch (state) {
+      _ConnectionVisualState.offline => Icons.keyboard_arrow_up_rounded,
+      _ConnectionVisualState.connecting => Icons.sync_rounded,
+      _ConnectionVisualState.connected => Icons.keyboard_arrow_down_rounded,
+    };
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF06111C).withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: accent.withValues(alpha: 0.24)),
+      ),
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        child: Row(
+          key: ValueKey(state),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: accent.withValues(alpha: 0.92), size: 18),
+            const SizedBox(width: 7),
+            Text(
+              text,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.62),
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConnectionAuraPainter extends CustomPainter {
+  final _ConnectionVisualState state;
+  final double pulse;
+  final Offset switchCenter;
+
+  const _ConnectionAuraPainter({
+    required this.state,
+    required this.pulse,
+    required this.switchCenter,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final accent = _stateAccent(state);
+    final statePower = switch (state) {
+      _ConnectionVisualState.offline => 0.34,
+      _ConnectionVisualState.connecting => 0.66,
+      _ConnectionVisualState.connected => 1.0,
+    };
+    final center = switchCenter == Offset.zero
+        ? Offset(size.width / 2, size.height * 0.78)
+        : switchCenter;
+
+    final bottomGlow = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          accent.withValues(alpha: 0.24 * statePower),
+          accent.withValues(alpha: 0.08 * statePower),
+          Colors.transparent,
+        ],
+        stops: const [0, 0.38, 1],
+      ).createShader(Rect.fromCircle(center: center, radius: 170 + 48 * pulse));
+    canvas.drawCircle(center, 170 + 48 * pulse, bottomGlow);
+
+    final topCenter = Offset(size.width / 2, size.height * 0.23);
+    final topGlow = Paint()
+      ..shader =
+          RadialGradient(
+            colors: [
+              Colors.white.withValues(
+                alpha: state == _ConnectionVisualState.offline ? 0.07 : 0.03,
+              ),
+              accent.withValues(alpha: 0.12 * statePower),
+              Colors.transparent,
+            ],
+          ).createShader(
+            Rect.fromCircle(center: topCenter, radius: 155 + 28 * pulse),
+          );
+    canvas.drawCircle(topCenter, 155 + 28 * pulse, topGlow);
+
+    final ringPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..color = accent.withValues(alpha: 0.12 * statePower);
+    canvas.drawCircle(center, 90 + 24 * pulse, ringPaint);
+    canvas.drawCircle(center, 126 + 34 * pulse, ringPaint);
+  }
+
+  @override
+  bool shouldRepaint(_ConnectionAuraPainter oldDelegate) {
+    return oldDelegate.state != state ||
+        oldDelegate.pulse != pulse ||
+        oldDelegate.switchCenter != switchCenter;
   }
 }
 
@@ -677,6 +1033,7 @@ class _UpdateNoticeBanner extends StatelessWidget {
 }
 
 class _AppMonitorToggle extends StatelessWidget {
+  final _ConnectionVisualState state;
   final bool facebookSelected;
   final bool chromeSelected;
   final bool instagramSelected;
@@ -689,6 +1046,7 @@ class _AppMonitorToggle extends StatelessWidget {
   final VoidCallback onClear;
 
   const _AppMonitorToggle({
+    required this.state,
     required this.facebookSelected,
     required this.chromeSelected,
     required this.instagramSelected,
@@ -708,27 +1066,49 @@ class _AppMonitorToggle extends StatelessWidget {
         chromeSelected ||
         instagramSelected ||
         viberSelected;
+    final accent = _stateAccent(state);
+    final activeState = state != _ConnectionVisualState.offline;
 
     return Opacity(
-      opacity: enabled ? 1.0 : 0.45,
+      opacity: enabled ? 1.0 : 0.58,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        width: 184,
-        padding: const EdgeInsets.all(8),
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+        width: 250,
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: const Color(0xFF071522).withValues(alpha: 0.72),
-          borderRadius: BorderRadius.circular(8),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              const Color(
+                0xFF112B43,
+              ).withValues(alpha: activeState ? 0.58 : 0.84),
+              const Color(0xFF07131F).withValues(alpha: 0.92),
+              Color.lerp(
+                const Color(0xFF061421),
+                accent,
+                activeState ? 0.10 : 0.04,
+              )!,
+            ],
+          ),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: selected
-                ? _red.withValues(alpha: 0.55)
-                : Colors.white.withValues(alpha: 0.18),
-            width: 1.1,
+                ? accent.withValues(alpha: 0.72)
+                : Colors.white.withValues(alpha: activeState ? 0.16 : 0.26),
+            width: 1.4,
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.30),
-              blurRadius: 16,
-              offset: const Offset(0, 8),
+              color: Colors.black.withValues(alpha: 0.38),
+              blurRadius: 28,
+              offset: const Offset(0, 18),
+            ),
+            BoxShadow(
+              color: accent.withValues(alpha: selected ? 0.20 : 0.08),
+              blurRadius: 28,
+              spreadRadius: selected ? 1 : 0,
             ),
           ],
         ),
@@ -736,6 +1116,7 @@ class _AppMonitorToggle extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             _MonitorAppOption(
+              accent: accent,
               selected: facebookSelected,
               enabled: enabled,
               semanticLabel: 'Facebook app monitor',
@@ -748,6 +1129,7 @@ class _AppMonitorToggle extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             _MonitorAppOption(
+              accent: accent,
               selected: chromeSelected,
               enabled: enabled,
               semanticLabel: 'Chrome app monitor',
@@ -760,6 +1142,7 @@ class _AppMonitorToggle extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             _MonitorAppOption(
+              accent: accent,
               selected: instagramSelected,
               enabled: enabled,
               semanticLabel: 'Instagram app monitor',
@@ -772,6 +1155,7 @@ class _AppMonitorToggle extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             _MonitorAppOption(
+              accent: accent,
               selected: viberSelected,
               enabled: enabled,
               semanticLabel: 'Viber app monitor',
@@ -785,7 +1169,7 @@ class _AppMonitorToggle extends StatelessWidget {
             if (selected) ...[
               const SizedBox(height: 8),
               SizedBox(
-                width: 168,
+                width: 226,
                 height: 38,
                 child: OutlinedButton.icon(
                   onPressed: enabled ? onClear : null,
@@ -793,9 +1177,9 @@ class _AppMonitorToggle extends StatelessWidget {
                   label: const Text('Disable automation'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white.withValues(alpha: 0.88),
-                    side: BorderSide(color: _red.withValues(alpha: 0.50)),
+                    side: BorderSide(color: accent.withValues(alpha: 0.50)),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(10),
                     ),
                     textStyle: const TextStyle(
                       fontSize: 12,
@@ -813,6 +1197,7 @@ class _AppMonitorToggle extends StatelessWidget {
 }
 
 class _MonitorAppOption extends StatelessWidget {
+  final Color accent;
   final bool selected;
   final bool enabled;
   final String semanticLabel;
@@ -821,6 +1206,7 @@ class _MonitorAppOption extends StatelessWidget {
   final Widget logo;
 
   const _MonitorAppOption({
+    required this.accent,
     required this.selected,
     required this.enabled,
     required this.semanticLabel,
@@ -832,11 +1218,15 @@ class _MonitorAppOption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final borderColor = selected
-        ? _red.withValues(alpha: 0.95)
-        : Colors.white.withValues(alpha: 0.62);
+        ? accent.withValues(alpha: 0.95)
+        : Colors.white.withValues(alpha: 0.48);
     final fillColor = selected
-        ? const Color(0xFF2C0B12).withValues(alpha: 0.95)
-        : const Color(0xFF102B44).withValues(alpha: 0.94);
+        ? Color.lerp(
+            const Color(0xFF102B44),
+            accent,
+            0.20,
+          )!.withValues(alpha: 0.95)
+        : const Color(0xFF0D263C).withValues(alpha: 0.92);
 
     return Semantics(
       button: true,
@@ -845,19 +1235,24 @@ class _MonitorAppOption extends StatelessWidget {
       child: GestureDetector(
         onTap: enabled ? () => onChanged(!selected) : null,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          width: 168,
-          height: 54,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+          width: 226,
+          height: 62,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
-            color: fillColor,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: borderColor, width: 1.6),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [fillColor, Color.lerp(fillColor, Colors.black, 0.22)!],
+            ),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderColor, width: selected ? 1.9 : 1.4),
             boxShadow: selected
                 ? [
                     BoxShadow(
-                      color: _red.withValues(alpha: 0.26),
-                      blurRadius: 18,
+                      color: accent.withValues(alpha: 0.30),
+                      blurRadius: 22,
                       spreadRadius: 1,
                     ),
                   ]
@@ -874,25 +1269,36 @@ class _MonitorAppOption extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.90),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    color: Colors.white.withValues(alpha: 0.94),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0,
                   ),
                 ),
               ),
               AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                width: 30,
-                height: 30,
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
-                  color: selected ? _red : Colors.transparent,
-                  borderRadius: BorderRadius.circular(6),
+                  color: selected ? accent : Colors.transparent,
+                  borderRadius: BorderRadius.circular(10),
                   border: Border.all(
                     color: selected
-                        ? const Color(0xFFFF6A6A)
+                        ? Colors.white.withValues(alpha: 0.72)
                         : Colors.white.withValues(alpha: 0.46),
                     width: 1.4,
                   ),
+                  boxShadow: selected
+                      ? [
+                          BoxShadow(
+                            color: accent.withValues(alpha: 0.36),
+                            blurRadius: 14,
+                            spreadRadius: 1,
+                          ),
+                        ]
+                      : null,
                 ),
                 child: selected
                     ? const Icon(Icons.check, size: 17, color: Colors.white)
@@ -1062,12 +1468,14 @@ class _ViberLogoPainter extends CustomPainter {
 
 class _LightSwitch extends StatefulWidget {
   final bool connected;
+  final bool connecting;
   final double warpLevel;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
 
   const _LightSwitch({
     required this.connected,
+    required this.connecting,
     required this.warpLevel,
     required this.onConnect,
     required this.onDisconnect,
@@ -1086,18 +1494,24 @@ class _LightSwitchState extends State<_LightSwitch> {
 
   // 0.0 = bottom (disconnected), 1.0 = top (connected)
   double get _thumbProgress {
-    final base = widget.connected ? 1.0 : 0.0;
+    final base = widget.connected
+        ? 1.0
+        : widget.connecting
+        ? 0.56
+        : 0.0;
     final drag = _dragDelta / _travel;
     return (base + drag).clamp(0.0, 1.0);
   }
 
   void _onPanStart(DragStartDetails d) {
+    if (widget.connecting) return;
     setState(() {
       _dragDelta = 0.0;
     });
   }
 
   void _onPanUpdate(DragUpdateDetails d) {
+    if (widget.connecting) return;
     setState(() {
       // drag up = negative dy = positive delta
       _dragDelta = (_dragDelta - d.delta.dy).clamp(
@@ -1108,6 +1522,7 @@ class _LightSwitchState extends State<_LightSwitch> {
   }
 
   void _onPanEnd(DragEndDetails d) {
+    if (widget.connecting) return;
     final threshold = _travel * 0.4;
     final delta = _dragDelta;
     setState(() {
@@ -1124,28 +1539,22 @@ class _LightSwitchState extends State<_LightSwitch> {
   Widget build(BuildContext context) {
     final p = _thumbProgress;
     final warp = widget.warpLevel;
+    final state = widget.connected
+        ? _ConnectionVisualState.connected
+        : widget.connecting
+        ? _ConnectionVisualState.connecting
+        : _ConnectionVisualState.offline;
+    final accent = _stateAccent(state);
 
     final trackColor = Color.lerp(
-      const Color(0xFF0E2235),
-      const Color(0xFF1A0808),
-      warp,
+      const Color(0xFF0B2236),
+      Color.lerp(const Color(0xFF291118), accent, 0.18)!,
+      widget.connecting ? 0.58 : warp,
     )!;
-    final trackBorder = Color.lerp(
-      const Color(0xFF1A3348),
-      const Color(0xFF660000),
-      p,
-    )!;
-    final thumbColor = Color.lerp(
-      const Color(0xFF152436),
-      const Color(0xFFCC0000),
-      p,
-    )!;
-    final thumbBorder = Color.lerp(
-      const Color(0xFF1E3550),
-      const Color(0xFFFF2222),
-      p,
-    )!;
-    final iconColor = Color.lerp(const Color(0xFF3A6080), _litText, p)!;
+    final trackBorder = Color.lerp(const Color(0xFF2D5B78), accent, p)!;
+    final thumbColor = Color.lerp(const Color(0xFF16324A), accent, p)!;
+    final thumbBorder = Color.lerp(const Color(0xFF67B8DF), Colors.white, p)!;
+    final iconColor = Color.lerp(const Color(0xFF86DFFF), _litText, p)!;
 
     // p=0 → thumb at bottom, p=1 → thumb at top
     final thumbOffset = (1.0 - p) * _travel;
@@ -1154,13 +1563,30 @@ class _LightSwitchState extends State<_LightSwitch> {
       onVerticalDragStart: _onPanStart,
       onVerticalDragUpdate: _onPanUpdate,
       onVerticalDragEnd: _onPanEnd,
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
         width: _thumbD + 24,
         height: _trackH,
         decoration: BoxDecoration(
           color: trackColor,
           borderRadius: BorderRadius.circular(_trackH / 2),
-          border: Border.all(color: trackBorder, width: 1.5),
+          border: Border.all(
+            color: trackBorder,
+            width: widget.connecting ? 2.0 : 1.5,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withValues(alpha: 0.10 + p * 0.22),
+              blurRadius: 30,
+              spreadRadius: 2,
+            ),
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.32),
+              blurRadius: 22,
+              offset: const Offset(0, 14),
+            ),
+          ],
         ),
         child: Stack(
           clipBehavior: Clip.none,
@@ -1175,7 +1601,9 @@ class _LightSwitchState extends State<_LightSwitch> {
                   width: 20,
                   height: 3,
                   decoration: BoxDecoration(
-                    color: trackBorder.withValues(alpha: 0.6),
+                    color: trackBorder.withValues(
+                      alpha: widget.connecting ? 0.95 : 0.6,
+                    ),
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
@@ -1183,12 +1611,16 @@ class _LightSwitchState extends State<_LightSwitch> {
             ),
 
             // Thumb
-            Positioned(
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 360),
+              curve: Curves.easeOutCubic,
               top: thumbOffset + 8,
               left: 0,
               right: 0,
               child: Center(
-                child: Container(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeOutCubic,
                   width: _thumbD,
                   height: _thumbD,
                   decoration: BoxDecoration(
@@ -1198,9 +1630,11 @@ class _LightSwitchState extends State<_LightSwitch> {
                     boxShadow: p > 0.05
                         ? [
                             BoxShadow(
-                              color: _red.withValues(alpha: p * 0.50),
-                              blurRadius: 28 * p,
-                              spreadRadius: 4 * p,
+                              color: accent.withValues(
+                                alpha: widget.connecting ? 0.52 : p * 0.50,
+                              ),
+                              blurRadius: widget.connecting ? 34 : 28 * p,
+                              spreadRadius: widget.connecting ? 6 : 4 * p,
                             ),
                           ]
                         : null,
